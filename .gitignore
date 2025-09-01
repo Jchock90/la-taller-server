@@ -1,0 +1,10 @@
+# dependencias
+node_modules/
+
+# variables privadas
+.env
+
+# logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
