@@ -21,17 +21,15 @@ const client = new MercadoPagoConfig({
 
 app.post("/create_preference", async (req, res) => {
   try {
-    const { title, unit_price, quantity, ...buyerData } = req.body;
+    const { items, ...buyerData } = req.body;
     const preference = new Preference(client);
-    const response = await preference.create({
-      body: {
-        items: [
-          {
-            title,
-            unit_price: Number(unit_price),
-            quantity: Number(quantity),
-          },
-        ],
+    const mpItems = items.map((item) => ({
+      title: item.title,
+      unit_price: Number(item.unit_price),
+      quantity: Number(item.quantity),
+    }));
+    const body = {
+        items: mpItems,
         back_urls: {
           success: "http://localhost:5173/success",
           failure: "http://localhost:5173/failure",
@@ -39,9 +37,13 @@ app.post("/create_preference", async (req, res) => {
         },
         /* auto_return: "approved", */
         metadata: buyerData,
-      },
-    });
-    purchaseData[response.id] = { ...buyerData, title, unit_price, quantity };
+      };
+    if (process.env.NGROK_URL) {
+      body.notification_url = `${process.env.NGROK_URL}/webhook`;
+    }
+    const response = await preference.create({ body });
+    console.log("Preference creada:", response.id, "Items:", mpItems.length);
+    purchaseData[response.id] = { ...buyerData, items };
     res.json({ id: response.id, init_point: response.init_point });
   } catch (error) {
     console.error(error);
@@ -61,32 +63,34 @@ const transporter = nodemailer.createTransport({
 
 app.post("/webhook", async (req, res) => {
   try {
-    const { type, data } = req.body;
-    if (type === "payment") {
-      const paymentId = data.id;
+    console.log("Webhook recibido:", JSON.stringify(req.body));
+    console.log("Query params:", req.query);
+    const { type, action, data } = req.body;
+    const isPayment = type === "payment" || (action && action.startsWith("payment"));
+    if (isPayment) {
+      console.log("Procesando pago, purchaseData keys:", Object.keys(purchaseData));
       let found = null;
-      for (const [prefId, info] of Object.entries(purchaseData)) {
-        if (info && info.preference_id === prefId) {
-          found = { prefId, ...info };
-          break;
-        }
-      }
-      if (!found && Object.keys(purchaseData).length > 0) {
+      if (Object.keys(purchaseData).length > 0) {
         const lastPrefId = Object.keys(purchaseData).pop();
         found = { prefId: lastPrefId, ...purchaseData[lastPrefId] };
       }
       if (found) {
+        const itemsList = (found.items || [])
+          .map((i) => `- ${i.title} x${i.quantity} — $${(i.unit_price * i.quantity).toLocaleString("es-AR")}`)
+          .join("\n");
+        const total = (found.items || []).reduce((s, i) => s + i.unit_price * i.quantity, 0);
+
         await transporter.sendMail({
           from: process.env.EMAIL_USER,
           to: process.env.ADMIN_EMAIL,
-          subject: `Nueva compra: ${found.title}`,
-          text: `Datos de la compra:\n\n${JSON.stringify(found, null, 2)}`,
+          subject: `Nueva compra en La Taller`,
+          text: `Datos del comprador:\nNombre: ${found.nombre} ${found.apellido}\nEmail: ${found.email}\nTeléfono: ${found.telefono}\nDirección: ${found.ciudad}, ${found.provincia} (CP: ${found.codigoPostal})\n\nProductos:\n${itemsList}\n\nTotal: $${total.toLocaleString("es-AR")}`,
         });
         await transporter.sendMail({
           from: process.env.EMAIL_USER,
           to: found.email,
           subject: "¡Compra exitosa en La Taller!",
-          text: `Hola ${found.nombre},\n\nTu compra fue exitosa. Pronto recibirás noticias por mail o teléfono con los datos del despacho del producto.\n\n¡Gracias por confiar en La Taller!`,
+          text: `Hola ${found.nombre},\n\nTu compra fue exitosa. Estos son tus productos:\n${itemsList}\n\nTotal: $${total.toLocaleString("es-AR")}\n\nPronto recibirás noticias por mail o teléfono con los datos del despacho.\n\n¡Gracias por confiar en La Taller!`,
         });
       }
     }
