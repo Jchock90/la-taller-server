@@ -4,6 +4,9 @@ node_modules/
 # variables privadas
 .env
 
+# datos de compras (persistencia local)
+purchaseData.json
+
 # logs
 npm-debug.log*
 yarn-debug.log*
