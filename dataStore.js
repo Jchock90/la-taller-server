@@ -6,13 +6,11 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const DATA_FILE = path.join(__dirname, 'purchaseData.json');
 
-// Cargar datos desde el archivo JSON
 export async function loadPurchaseData() {
   try {
     const data = await fs.readFile(DATA_FILE, 'utf-8');
     return JSON.parse(data);
   } catch (error) {
-    // Si el archivo no existe, devolver objeto vacío
     if (error.code === 'ENOENT') {
       return {};
     }
@@ -21,7 +19,6 @@ export async function loadPurchaseData() {
   }
 }
 
-// Guardar datos en el archivo JSON
 export async function savePurchaseData(data) {
   try {
     await fs.writeFile(DATA_FILE, JSON.stringify(data, null, 2), 'utf-8');
@@ -30,7 +27,6 @@ export async function savePurchaseData(data) {
   }
 }
 
-// Agregar un registro de compra
 export async function addPurchaseRecord(preferenceId, data) {
   const allData = await loadPurchaseData();
   allData[preferenceId] = {
@@ -40,13 +36,11 @@ export async function addPurchaseRecord(preferenceId, data) {
   await savePurchaseData(allData);
 }
 
-// Obtener un registro de compra
 export async function getPurchaseRecord(preferenceId) {
   const allData = await loadPurchaseData();
   return allData[preferenceId] || null;
 }
 
-// Limpiar registros antiguos (más de 7 días)
 export async function cleanOldRecords() {
   const allData = await loadPurchaseData();
   const now = new Date();

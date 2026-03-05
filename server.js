@@ -11,10 +11,8 @@ dotenv.config();
 
 const app = express();
 
-// Confiar en proxies (ngrok, nginx, etc.)
 app.set('trust proxy', 1);
 
-// Configurar CORS con origen específico
 const corsOptions = {
   origin: process.env.FRONTEND_URL || 'http://localhost:5173',
   optionsSuccessStatus: 200
@@ -22,25 +20,22 @@ const corsOptions = {
 app.use(cors(corsOptions));
 app.use(express.json());
 
-// Rate limiting para prevenir abuso
 const createPreferenceLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutos
-  max: 10, // límite de 10 requests por IP
+  windowMs: 15 * 60 * 1000,
+  max: 10,
   message: { error: "Demasiadas solicitudes desde esta IP, por favor intenta de nuevo más tarde." }
 });
 
 const webhookLimiter = rateLimit({
-  windowMs: 1 * 60 * 1000, // 1 minuto
-  max: 30, // límite de 30 webhooks por minuto
+  windowMs: 1 * 60 * 1000,
+  max: 30,
   message: { error: "Demasiadas notificaciones." }
 });
 
-// Cliente de MercadoPago
 const client = new MercadoPagoConfig({
   accessToken: process.env.MP_ACCESS_TOKEN,
 });
 
-// Validar datos de compra
 function validatePurchaseData(data) {
   const { items, nombre, apellido, email, telefono, provincia, ciudad, codigoPostal } = data;
   
@@ -95,8 +90,7 @@ function validatePurchaseData(data) {
 app.post("/create_preference", createPreferenceLimiter, async (req, res) => {
   try {
     const { items, ...buyerData } = req.body;
-    
-    // Validar datos
+
     const validation = validatePurchaseData(req.body);
     if (!validation.valid) {
       return res.status(400).json({ error: validation.error });
@@ -126,8 +120,7 @@ app.post("/create_preference", createPreferenceLimiter, async (req, res) => {
     
     const response = await preference.create({ body });
     console.log("Preference creada:", response.id, "Items:", mpItems.length);
-    
-    // Guardar datos en archivo JSON
+
     await addPurchaseRecord(response.id, { ...buyerData, items });
     
     res.json({ id: response.id, init_point: response.init_point });
@@ -137,7 +130,6 @@ app.post("/create_preference", createPreferenceLimiter, async (req, res) => {
   }
 });
 
-// Configurar transporte de email
 const transporter = nodemailer.createTransport({
   host: process.env.EMAIL_HOST,
   port: process.env.EMAIL_PORT,
@@ -158,15 +150,13 @@ app.post("/webhook", webhookLimiter, async (req, res) => {
     
     if (isPayment) {
       console.log("Procesando pago...");
-      
-      // Cargar todos los datos de compras
+
       const allPurchaseData = await loadPurchaseData();
       const purchaseKeys = Object.keys(allPurchaseData);
       console.log("Registros de compra disponibles:", purchaseKeys.length);
       
       let found = null;
-      
-      // Buscar el registro más reciente (el último creado)
+
       if (purchaseKeys.length > 0) {
         const lastPrefId = purchaseKeys[purchaseKeys.length - 1];
         found = { prefId: lastPrefId, ...allPurchaseData[lastPrefId] };
@@ -178,15 +168,13 @@ app.post("/webhook", webhookLimiter, async (req, res) => {
           .join("\n");
         const total = (found.items || []).reduce((s, i) => s + i.unit_price * i.quantity, 0);
 
-        // Email al administrador
         await transporter.sendMail({
           from: process.env.EMAIL_USER,
           to: process.env.ADMIN_EMAIL,
           subject: `Nueva compra en La Taller`,
           text: `Datos del comprador:\nNombre: ${found.nombre} ${found.apellido}\nEmail: ${found.email}\nTeléfono: ${found.telefono}\nDirección: ${found.ciudad}, ${found.provincia} (CP: ${found.codigoPostal})\n\nProductos:\n${itemsList}\n\nTotal: $${total.toLocaleString("es-AR")}`,
         });
-        
-        // Email al cliente
+
         await transporter.sendMail({
           from: process.env.EMAIL_USER,
           to: found.email,
@@ -207,10 +195,8 @@ app.post("/webhook", webhookLimiter, async (req, res) => {
   }
 });
 
-// Limpiar registros antiguos al iniciar el servidor
 cleanOldRecords();
 
-// Limpiar registros antiguos cada 24 horas
 setInterval(() => {
   cleanOldRecords();
 }, 24 * 60 * 60 * 1000);
