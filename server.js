@@ -1,13 +1,20 @@
 
 import express from "express";
+import crypto from "crypto";
 import cors from "cors";
-import { MercadoPagoConfig, Preference } from "mercadopago";
+import { MercadoPagoConfig, Preference, Payment } from "mercadopago";
 import dotenv from "dotenv";
 import nodemailer from "nodemailer";
 import rateLimit from "express-rate-limit";
-import { addPurchaseRecord, getPurchaseRecord, cleanOldRecords, loadPurchaseData } from "./dataStore.js";
+import { addPurchaseRecord, getPurchaseRecord, updatePurchaseStatus, cleanOldRecords, loadPurchaseData } from "./dataStore.js";
+import connectDB from "./config/db.js";
+import productRoutes from "./routes/products.js";
+import adminRoutes from "./routes/admin.js";
 
 dotenv.config();
+
+// Conectar a MongoDB
+await connectDB();
 
 const app = express();
 
@@ -19,6 +26,10 @@ const corsOptions = {
 };
 app.use(cors(corsOptions));
 app.use(express.json());
+
+// Rutas de productos (público) y admin (protegido)
+app.use('/api/products', productRoutes);
+app.use('/api/admin', adminRoutes);
 
 const createPreferenceLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
@@ -104,8 +115,10 @@ app.post("/create_preference", createPreferenceLimiter, async (req, res) => {
     }));
     
     const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:5173';
+    const orderId = crypto.randomUUID();
     const body = {
       items: mpItems,
+      external_reference: orderId,
       back_urls: {
         success: `${frontendUrl}/success`,
         failure: `${frontendUrl}/failure`,
@@ -119,9 +132,9 @@ app.post("/create_preference", createPreferenceLimiter, async (req, res) => {
     }
     
     const response = await preference.create({ body });
-    console.log("Preference creada:", response.id, "Items:", mpItems.length);
+    console.log("Preference creada:", response.id, "Order:", orderId, "Items:", mpItems.length);
 
-    await addPurchaseRecord(response.id, { ...buyerData, items });
+    await addPurchaseRecord(orderId, { ...buyerData, items, status: 'pending' });
     
     res.json({ id: response.id, init_point: response.init_point });
   } catch (error) {
@@ -148,21 +161,26 @@ app.post("/webhook", webhookLimiter, async (req, res) => {
     const { type, action, data } = req.body;
     const isPayment = type === "payment" || (action && action.startsWith("payment"));
     
-    if (isPayment) {
-      console.log("Procesando pago...");
+    if (isPayment && data?.id) {
+      console.log("Verificando pago", data.id, "con MercadoPago...");
 
-      const allPurchaseData = await loadPurchaseData();
-      const purchaseKeys = Object.keys(allPurchaseData);
-      console.log("Registros de compra disponibles:", purchaseKeys.length);
+      const payment = new Payment(client);
+      const paymentInfo = await payment.get({ id: data.id });
       
-      let found = null;
+      console.log("Estado del pago:", paymentInfo.status);
 
-      if (purchaseKeys.length > 0) {
-        const lastPrefId = purchaseKeys[purchaseKeys.length - 1];
-        found = { prefId: lastPrefId, ...allPurchaseData[lastPrefId] };
+      if (paymentInfo.status !== "approved") {
+        console.log("Pago no aprobado, ignorando.");
+        return res.sendStatus(200);
       }
+
+      // Buscar datos del comprador por external_reference
+      const orderId = paymentInfo.external_reference;
+      const found = orderId ? await getPurchaseRecord(orderId) : null;
       
-      if (found) {
+      if (found && found.status !== 'approved') {
+        await updatePurchaseStatus(orderId, 'approved');
+
         const itemsList = (found.items || [])
           .map((i) => `- ${i.title} x${i.quantity} — $${(i.unit_price * i.quantity).toLocaleString("es-AR")}`)
           .join("\n");
@@ -182,9 +200,11 @@ app.post("/webhook", webhookLimiter, async (req, res) => {
           text: `Hola ${found.nombre},\n\nTu compra fue exitosa. Estos son tus productos:\n${itemsList}\n\nTotal: $${total.toLocaleString("es-AR")}\n\nPronto recibirás noticias por mail o teléfono con los datos del despacho.\n\n¡Gracias por confiar en La Taller!`,
         });
         
-        console.log("Emails enviados correctamente");
+        console.log("Pago aprobado - Emails enviados correctamente");
+      } else if (found?.status === 'approved') {
+        console.log("Pago ya procesado anteriormente, ignorando duplicado.");
       } else {
-        console.log("No se encontraron datos de compra para este webhook");
+        console.log("No se encontraron datos de compra para order:", orderId);
       }
     }
     

@@ -1,6 +1,6 @@
 {
-  "watch": ["server.js", "dataStore.js"],
-  "ignore": ["purchaseData.json", "*.log", "node_modules"],
+  "watch": ["server.js", "dataStore.js", "routes/", "config/", "middleware/", "models/"],
+  "ignore": ["purchaseData.json", "_sync_temp.json", "products_export.json", "*.log", "node_modules"],
   "ext": "js,json",
   "delay": 1000
 }

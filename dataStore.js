@@ -41,15 +41,27 @@ export async function getPurchaseRecord(preferenceId) {
   return allData[preferenceId] || null;
 }
 
+export async function updatePurchaseStatus(preferenceId, status) {
+  const allData = await loadPurchaseData();
+  if (allData[preferenceId]) {
+    allData[preferenceId].status = status;
+    await savePurchaseData(allData);
+  }
+}
+
 export async function cleanOldRecords() {
   const allData = await loadPurchaseData();
   const now = new Date();
   const sevenDaysAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+  const oneDayAgo = new Date(now.getTime() - 24 * 60 * 60 * 1000);
   
   const cleanedData = {};
   for (const [key, value] of Object.entries(allData)) {
     const recordDate = new Date(value.timestamp);
-    if (recordDate > sevenDaysAgo) {
+    // Compras aprobadas: mantener 7 días
+    // Compras pendientes: mantener solo 1 día
+    const keepUntil = value.status === 'approved' ? sevenDaysAgo : oneDayAgo;
+    if (recordDate > keepUntil) {
       cleanedData[key] = value;
     }
   }
