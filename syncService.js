@@ -30,3 +30,29 @@ export function triggerSync() {
     }
   });
 }
+
+export function syncPurchaseToAtlas(purchaseDoc) {
+  const atlasUri = process.env.ATLAS_URI;
+  if (!atlasUri) return;
+
+  setImmediate(async () => {
+    let atlasConn;
+    try {
+      atlasConn = await mongoose.createConnection(atlasUri).asPromise();
+      const atlasColl = atlasConn.db.collection('purchases');
+
+      const { _id, ...data } = purchaseDoc;
+      await atlasColl.updateOne(
+        { orderId: purchaseDoc.orderId },
+        { $set: data },
+        { upsert: true }
+      );
+
+      console.log(`☁️  Sync: Compra ${purchaseDoc.orderId} (${purchaseDoc.status}) → Atlas`);
+    } catch (err) {
+      console.error('☁️  Sync purchase error:', err.message);
+    } finally {
+      if (atlasConn) await atlasConn.close();
+    }
+  });
+}

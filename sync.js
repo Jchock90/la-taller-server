@@ -14,20 +14,31 @@ async function sync() {
   const products = await mongoose.connection.db.collection('products').find({}).toArray();
   console.log(`📦 ${products.length} productos encontrados localmente`);
 
-  if (products.length === 0) {
-    console.log('⚠️  No hay productos para sincronizar');
-    await mongoose.disconnect();
-    return;
-  }
+  const purchases = await mongoose.connection.db.collection('purchases').find({}).toArray();
+  console.log(`🛒 ${purchases.length} compras encontradas localmente`);
 
   console.log('☁️  Conectando a Atlas...');
   const atlasConn = await mongoose.createConnection(atlasUri).asPromise();
-  const atlasColl = atlasConn.db.collection('products');
 
-  await atlasColl.deleteMany({});
-  await atlasColl.insertMany(products);
-
+  // Sync productos
+  const atlasProd = atlasConn.db.collection('products');
+  await atlasProd.deleteMany({});
+  if (products.length > 0) {
+    await atlasProd.insertMany(products);
+  }
   console.log(`✅ ${products.length} productos sincronizados con Atlas`);
+
+  // Sync compras
+  const atlasPurch = atlasConn.db.collection('purchases');
+  for (const purchase of purchases) {
+    const { _id, ...purchaseData } = purchase;
+    await atlasPurch.updateOne(
+      { orderId: purchase.orderId },
+      { $set: purchaseData },
+      { upsert: true }
+    );
+  }
+  console.log(`✅ ${purchases.length} compras sincronizadas con Atlas`);
 
   await atlasConn.close();
   await mongoose.disconnect();

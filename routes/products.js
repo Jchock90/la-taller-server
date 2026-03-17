@@ -29,6 +29,7 @@ router.get('/', async (req, res) => {
         composicion: product.composicion,
         fabricacion: product.fabricacion,
         cuidados: product.cuidados,
+        categoria: product.categoria || '',
       });
     }
 

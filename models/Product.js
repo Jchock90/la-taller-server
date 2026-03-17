@@ -48,6 +48,11 @@ const productSchema = new mongoose.Schema({
     type: String,
     default: '',
   },
+  categoria: {
+    type: String,
+    default: '',
+    trim: true,
+  },
   active: {
     type: Boolean,
     default: true,

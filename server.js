@@ -11,6 +11,7 @@ import connectDB from "./config/db.js";
 import productRoutes from "./routes/products.js";
 import adminRoutes from "./routes/admin.js";
 import Purchase from "./models/Purchase.js";
+import { syncPurchaseToAtlas } from "./syncService.js";
 
 dotenv.config();
 
@@ -152,6 +153,21 @@ app.post("/create_preference", createPreferenceLimiter, async (req, res) => {
       items,
       total,
     });
+
+    syncPurchaseToAtlas({
+      orderId,
+      status: 'pending',
+      nombre: buyerData.nombre,
+      apellido: buyerData.apellido,
+      email: buyerData.email,
+      telefono: buyerData.telefono,
+      provincia: buyerData.provincia,
+      ciudad: buyerData.ciudad,
+      codigoPostal: buyerData.codigoPostal,
+      items,
+      total,
+      createdAt: new Date(),
+    });
     
     res.json({ id: response.id, init_point: response.init_point });
   } catch (error) {
@@ -186,16 +202,17 @@ app.post("/webhook", webhookLimiter, async (req, res) => {
       
       console.log("Estado del pago:", paymentInfo.status);
 
-      // Si el pago sigue pendiente, actualizar estado en DB y esperar
-      if (paymentInfo.status === "pending") {
+      // Si el pago sigue pendiente o en revisión, actualizar estado en DB y esperar
+      if (paymentInfo.status === "pending" || paymentInfo.status === "in_process") {
         const orderId = paymentInfo.external_reference;
         if (orderId) {
-          await Purchase.findOneAndUpdate(
+          const sale = await Purchase.findOneAndUpdate(
             { orderId },
-            { status: 'pending', paymentId: String(data.id) },
-            { upsert: false }
+            { status: paymentInfo.status, paymentId: String(data.id) },
+            { returnDocument: 'after' }
           );
-          console.log("Pago pendiente - esperando acreditación para order:", orderId);
+          if (sale) syncPurchaseToAtlas(sale.toObject());
+          console.log(`Pago ${paymentInfo.status} para order: ${orderId}`);
         }
         return res.sendStatus(200);
       }
@@ -272,9 +289,7 @@ app.post("/webhook", webhookLimiter, async (req, res) => {
         });
 
         // Guardar compra en MongoDB
-        await Purchase.findOneAndUpdate(
-          { orderId },
-          {
+        const approvedData = {
             orderId,
             paymentId: String(data.id),
             status: 'approved',
@@ -287,11 +302,16 @@ app.post("/webhook", webhookLimiter, async (req, res) => {
             codigoPostal: found.codigoPostal,
             items: found.items,
             total,
-          },
+        };
+        await Purchase.findOneAndUpdate(
+          { orderId },
+          approvedData,
           { upsert: true, returnDocument: 'after' }
         );
+
+        syncPurchaseToAtlas(approvedData);
         
-        console.log("Pago aprobado - Emails enviados - Compra guardada en DB");
+        console.log("Pago aprobado - Emails enviados - Compra guardada en DB y Atlas");
       } else if (found?.status === 'approved') {
         console.log("Pago ya procesado anteriormente, ignorando duplicado.");
       } else {
@@ -315,13 +335,13 @@ setInterval(() => {
 // Reconciliación al arrancar: verificar compras pendientes con MercadoPago
 async function reconcilePendingPurchases() {
   try {
-    const pendingPurchases = await Purchase.find({ status: 'pending' });
+    const pendingPurchases = await Purchase.find({ status: { $in: ['pending', 'in_process'] } });
     if (pendingPurchases.length === 0) {
       console.log("Reconciliación: No hay compras pendientes.");
       return;
     }
 
-    console.log(`Reconciliación: Verificando ${pendingPurchases.length} compra(s) pendiente(s)...`);
+    console.log(`Reconciliación: Verificando ${pendingPurchases.length} compra(s) pendiente(s)/en revisión...`);
     const payment = new Payment(client);
 
     for (const purchase of pendingPurchases) {
@@ -345,6 +365,7 @@ async function reconcilePendingPurchases() {
         if (paymentInfo.status === 'approved') {
           await Purchase.findByIdAndUpdate(purchase._id, { status: 'approved' });
           await updatePurchaseStatus(purchase.orderId, 'approved');
+          syncPurchaseToAtlas({ ...purchase.toObject(), status: 'approved' });
 
           const itemsList = (purchase.items || [])
             .map((i) => `- ${i.title} x${i.quantity} — $${(i.unit_price * i.quantity).toLocaleString("es-AR")}`)
@@ -370,6 +391,9 @@ async function reconcilePendingPurchases() {
           await Purchase.findByIdAndUpdate(purchase._id, { status: 'rejected' });
           await updatePurchaseStatus(purchase.orderId, 'rejected');
           console.log(`  Pago ${purchase.orderId} rechazado/cancelado.`);
+        } else if (paymentInfo.status === 'in_process') {
+          await Purchase.findByIdAndUpdate(purchase._id, { status: 'in_process' });
+          console.log(`  Pago ${purchase.orderId} sigue en revisión.`);
         }
       } catch (err) {
         console.error(`  Error verificando order ${purchase.orderId}:`, err.message);

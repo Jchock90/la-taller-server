@@ -1,12 +1,105 @@
 import express from 'express';
 import jwt from 'jsonwebtoken';
 import bcrypt from 'bcryptjs';
+import multer from 'multer';
+import { v2 as cloudinary } from 'cloudinary';
 import Product from '../models/Product.js';
 import Purchase from '../models/Purchase.js';
 import authMiddleware from '../middleware/auth.js';
-import { triggerSync } from '../syncService.js';
+import { triggerSync, syncPurchaseToAtlas } from '../syncService.js';
 
 const router = express.Router();
+
+// Configurar multer (almacenamiento en memoria, max 5MB)
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 5 * 1024 * 1024 },
+  fileFilter: (req, file, cb) => {
+    if (file.mimetype.startsWith('image/')) {
+      cb(null, true);
+    } else {
+      cb(new Error('Solo se permiten imágenes'), false);
+    }
+  },
+});
+
+// POST /api/admin/upload - Subir imagen a Cloudinary
+router.post('/upload', authMiddleware, upload.single('image'), async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ error: 'No se envió ninguna imagen' });
+    }
+
+    // Configurar Cloudinary (lazy, después de que dotenv cargue)
+    cloudinary.config({
+      cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+      api_key: process.env.CLOUDINARY_API_KEY,
+      api_secret: process.env.CLOUDINARY_API_SECRET,
+    });
+
+    // Si hay una URL anterior de Cloudinary, borrar la imagen vieja
+    const oldUrl = req.body.oldUrl;
+    console.log('Upload recibido - oldUrl:', oldUrl || '(ninguna)');
+    if (oldUrl && oldUrl.includes('res.cloudinary.com')) {
+      try {
+        const parts = oldUrl.split('/upload/');
+        if (parts[1]) {
+          const publicId = parts[1].replace(/^v\d+\//, '').replace(/\.[^.]+$/, '');
+          await cloudinary.uploader.destroy(publicId);
+        }
+      } catch (delErr) {
+        console.warn('No se pudo borrar imagen anterior:', delErr.message);
+      }
+    }
+
+    const result = await new Promise((resolve, reject) => {
+      const stream = cloudinary.uploader.upload_stream(
+        {
+          folder: 'lataller/productos',
+          quality: 'auto',
+          fetch_format: 'auto',
+        },
+        (error, result) => {
+          if (error) reject(error);
+          else resolve(result);
+        }
+      );
+      stream.end(req.file.buffer);
+    });
+
+    res.json({ url: result.secure_url });
+  } catch (error) {
+    console.error('Error subiendo imagen:', error);
+    res.status(500).json({ error: 'Error al subir imagen' });
+  }
+});
+
+// POST /api/admin/delete-image - Borrar imagen de Cloudinary
+router.post('/delete-image', authMiddleware, async (req, res) => {
+  try {
+    const { imageUrl } = req.body;
+    if (!imageUrl || !imageUrl.includes('res.cloudinary.com')) {
+      return res.json({ ok: true });
+    }
+
+    cloudinary.config({
+      cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+      api_key: process.env.CLOUDINARY_API_KEY,
+      api_secret: process.env.CLOUDINARY_API_SECRET,
+    });
+
+    const parts = imageUrl.split('/upload/');
+    if (parts[1]) {
+      const publicId = parts[1].replace(/^v\d+\//, '').replace(/\.[^.]+$/, '');
+      await cloudinary.uploader.destroy(publicId);
+    }
+
+    res.json({ ok: true });
+  } catch (error) {
+    console.error('Error borrando imagen:', error);
+    res.status(500).json({ error: 'Error al borrar imagen' });
+  }
+});
 
 // POST /api/admin/login - Login de administrador
 router.post('/login', async (req, res) => {
@@ -56,7 +149,7 @@ router.post('/products', authMiddleware, async (req, res) => {
   try {
     const {
       name, price, imageUrl, gallery,
-      collectionName, collectionDescription,
+      collectionName, collectionDescription, categoria,
       talles, colores, composicion, fabricacion, cuidados,
       active, order
     } = req.body;
@@ -66,6 +159,7 @@ router.post('/products', authMiddleware, async (req, res) => {
       gallery: gallery || [],
       collectionName,
       collectionDescription: collectionDescription || '',
+      categoria: categoria || '',
       talles: talles || [],
       colores: colores || [],
       composicion: composicion || '',
@@ -93,7 +187,7 @@ router.put('/products/:id', authMiddleware, async (req, res) => {
   try {
     const allowedFields = [
       'name', 'price', 'imageUrl', 'gallery',
-      'collectionName', 'collectionDescription',
+      'collectionName', 'collectionDescription', 'categoria',
       'talles', 'colores', 'composicion', 'fabricacion', 'cuidados',
       'active', 'order'
     ];
@@ -282,6 +376,7 @@ router.put('/sales/:id/notes', authMiddleware, async (req, res) => {
       { returnDocument: 'after' }
     );
     if (!sale) return res.status(404).json({ error: 'Venta no encontrada' });
+    syncPurchaseToAtlas(sale.toObject());
     res.json(sale);
   } catch (error) {
     console.error('Error actualizando notas:', error);
@@ -293,7 +388,7 @@ router.put('/sales/:id/notes', authMiddleware, async (req, res) => {
 router.put('/sales/:id/status', authMiddleware, async (req, res) => {
   try {
     const { status } = req.body;
-    const valid = ['approved', 'refunded'];
+    const valid = ['approved', 'refunded', 'pending', 'in_process', 'rejected'];
     if (!valid.includes(status)) return res.status(400).json({ error: 'Estado inválido' });
 
     const sale = await Purchase.findByIdAndUpdate(
@@ -302,10 +397,38 @@ router.put('/sales/:id/status', authMiddleware, async (req, res) => {
       { returnDocument: 'after' }
     );
     if (!sale) return res.status(404).json({ error: 'Venta no encontrada' });
+    syncPurchaseToAtlas(sale.toObject());
     res.json(sale);
   } catch (error) {
     console.error('Error actualizando estado:', error);
     res.status(500).json({ error: 'Error al actualizar estado' });
+  }
+});
+
+// DELETE /api/admin/sales/:id - Eliminar una venta
+router.delete('/sales/:id', authMiddleware, async (req, res) => {
+  try {
+    const sale = await Purchase.findByIdAndDelete(req.params.id);
+    if (!sale) return res.status(404).json({ error: 'Venta no encontrada' });
+
+    // Sincronizar eliminación con Atlas
+    if (process.env.ATLAS_URI) {
+      try {
+        const { default: mongoose } = await import('mongoose');
+        const atlasConn = await mongoose.createConnection(process.env.ATLAS_URI).asPromise();
+        const AtlasPurchase = atlasConn.model('Purchase', Purchase.schema);
+        await AtlasPurchase.deleteOne({ orderId: sale.orderId });
+        await atlasConn.close();
+        console.log(`☁️  Sync: Venta ${sale.orderId} eliminada de Atlas`);
+      } catch (syncErr) {
+        console.warn('Error sincronizando eliminación:', syncErr.message);
+      }
+    }
+
+    res.json({ ok: true });
+  } catch (error) {
+    console.error('Error eliminando venta:', error);
+    res.status(500).json({ error: 'Error al eliminar venta' });
   }
 });
 
