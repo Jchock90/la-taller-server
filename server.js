@@ -10,6 +10,7 @@ import { addPurchaseRecord, getPurchaseRecord, updatePurchaseStatus, cleanOldRec
 import connectDB from "./config/db.js";
 import productRoutes from "./routes/products.js";
 import adminRoutes from "./routes/admin.js";
+import Purchase from "./models/Purchase.js";
 
 dotenv.config();
 
@@ -135,6 +136,22 @@ app.post("/create_preference", createPreferenceLimiter, async (req, res) => {
     console.log("Preference creada:", response.id, "Order:", orderId, "Items:", mpItems.length);
 
     await addPurchaseRecord(orderId, { ...buyerData, items, status: 'pending' });
+
+    // Guardar también en MongoDB como respaldo inmediato
+    const total = items.reduce((s, i) => s + i.unit_price * i.quantity, 0);
+    await Purchase.create({
+      orderId,
+      status: 'pending',
+      nombre: buyerData.nombre,
+      apellido: buyerData.apellido,
+      email: buyerData.email,
+      telefono: buyerData.telefono,
+      provincia: buyerData.provincia,
+      ciudad: buyerData.ciudad,
+      codigoPostal: buyerData.codigoPostal,
+      items,
+      total,
+    });
     
     res.json({ id: response.id, init_point: response.init_point });
   } catch (error) {
@@ -169,14 +186,68 @@ app.post("/webhook", webhookLimiter, async (req, res) => {
       
       console.log("Estado del pago:", paymentInfo.status);
 
+      // Si el pago sigue pendiente, actualizar estado en DB y esperar
+      if (paymentInfo.status === "pending") {
+        const orderId = paymentInfo.external_reference;
+        if (orderId) {
+          await Purchase.findOneAndUpdate(
+            { orderId },
+            { status: 'pending', paymentId: String(data.id) },
+            { upsert: false }
+          );
+          console.log("Pago pendiente - esperando acreditación para order:", orderId);
+        }
+        return res.sendStatus(200);
+      }
+
       if (paymentInfo.status !== "approved") {
-        console.log("Pago no aprobado, ignorando.");
+        // Pago rechazado u otro estado
+        const orderId = paymentInfo.external_reference;
+        if (orderId) {
+          await Purchase.findOneAndUpdate(
+            { orderId },
+            { status: 'rejected', paymentId: String(data.id) },
+            { upsert: false }
+          );
+        }
+        console.log(`Pago ${paymentInfo.status} para order: ${orderId}`);
         return res.sendStatus(200);
       }
 
       // Buscar datos del comprador por external_reference
       const orderId = paymentInfo.external_reference;
-      const found = orderId ? await getPurchaseRecord(orderId) : null;
+      let found = orderId ? await getPurchaseRecord(orderId) : null;
+
+      // Fallback 1: Si no está en JSON, buscar en MongoDB
+      if (!found && orderId) {
+        const dbRecord = await Purchase.findOne({ orderId });
+        if (dbRecord) {
+          found = dbRecord.toObject();
+          console.log("Datos recuperados desde MongoDB (no estaban en JSON)");
+        }
+      }
+
+      // Fallback 2: Si tampoco está en MongoDB, usar metadata de MercadoPago
+      if (!found && paymentInfo.metadata) {
+        const meta = paymentInfo.metadata;
+        if (meta.nombre && meta.email) {
+          found = {
+            nombre: meta.nombre,
+            apellido: meta.apellido || '',
+            email: meta.email,
+            telefono: meta.telefono || '',
+            provincia: meta.provincia || '',
+            ciudad: meta.ciudad || '',
+            codigoPostal: meta.codigo_postal || meta.codigoPostal || '',
+            items: paymentInfo.additional_info?.items?.map(i => ({
+              title: i.title,
+              unit_price: Number(i.unit_price),
+              quantity: Number(i.quantity),
+            })) || [],
+          };
+          console.log("Datos recuperados desde metadata de MercadoPago (no estaban en JSON ni MongoDB)");
+        }
+      }
       
       if (found && found.status !== 'approved') {
         await updatePurchaseStatus(orderId, 'approved');
@@ -199,8 +270,28 @@ app.post("/webhook", webhookLimiter, async (req, res) => {
           subject: "¡Compra exitosa en La Taller!",
           text: `Hola ${found.nombre},\n\nTu compra fue exitosa. Estos son tus productos:\n${itemsList}\n\nTotal: $${total.toLocaleString("es-AR")}\n\nPronto recibirás noticias por mail o teléfono con los datos del despacho.\n\n¡Gracias por confiar en La Taller!`,
         });
+
+        // Guardar compra en MongoDB
+        await Purchase.findOneAndUpdate(
+          { orderId },
+          {
+            orderId,
+            paymentId: String(data.id),
+            status: 'approved',
+            nombre: found.nombre,
+            apellido: found.apellido,
+            email: found.email,
+            telefono: found.telefono,
+            provincia: found.provincia,
+            ciudad: found.ciudad,
+            codigoPostal: found.codigoPostal,
+            items: found.items,
+            total,
+          },
+          { upsert: true, returnDocument: 'after' }
+        );
         
-        console.log("Pago aprobado - Emails enviados correctamente");
+        console.log("Pago aprobado - Emails enviados - Compra guardada en DB");
       } else if (found?.status === 'approved') {
         console.log("Pago ya procesado anteriormente, ignorando duplicado.");
       } else {
@@ -220,6 +311,79 @@ cleanOldRecords();
 setInterval(() => {
   cleanOldRecords();
 }, 24 * 60 * 60 * 1000);
+
+// Reconciliación al arrancar: verificar compras pendientes con MercadoPago
+async function reconcilePendingPurchases() {
+  try {
+    const pendingPurchases = await Purchase.find({ status: 'pending' });
+    if (pendingPurchases.length === 0) {
+      console.log("Reconciliación: No hay compras pendientes.");
+      return;
+    }
+
+    console.log(`Reconciliación: Verificando ${pendingPurchases.length} compra(s) pendiente(s)...`);
+    const payment = new Payment(client);
+
+    for (const purchase of pendingPurchases) {
+      try {
+        // Sin paymentId no podemos consultar a MP
+        if (!purchase.paymentId) {
+          const hoursOld = (Date.now() - new Date(purchase.createdAt).getTime()) / (1000 * 60 * 60);
+          if (hoursOld > 48) {
+            await Purchase.findByIdAndUpdate(purchase._id, { status: 'rejected' });
+            console.log(`  Order ${purchase.orderId}: Expirada (${Math.round(hoursOld)}h sin paymentId), marcada como rechazada.`);
+          } else {
+            console.log(`  Order ${purchase.orderId}: Sin paymentId, esperando webhook (${Math.round(hoursOld)}h).`);
+          }
+          continue;
+        }
+
+        // Verificar estado con MercadoPago
+        const paymentInfo = await payment.get({ id: purchase.paymentId });
+        console.log(`  Order ${purchase.orderId} (Payment ${purchase.paymentId}): Estado MP = ${paymentInfo.status}`);
+
+        if (paymentInfo.status === 'approved') {
+          await Purchase.findByIdAndUpdate(purchase._id, { status: 'approved' });
+          await updatePurchaseStatus(purchase.orderId, 'approved');
+
+          const itemsList = (purchase.items || [])
+            .map((i) => `- ${i.title} x${i.quantity} — $${(i.unit_price * i.quantity).toLocaleString("es-AR")}`)
+            .join("\n");
+          const total = purchase.total || purchase.items.reduce((s, i) => s + i.unit_price * i.quantity, 0);
+
+          await transporter.sendMail({
+            from: process.env.EMAIL_USER,
+            to: process.env.ADMIN_EMAIL,
+            subject: `Nueva compra en La Taller (reconciliada)`,
+            text: `Esta compra fue aprobada mientras el servidor estaba apagado.\n\nDatos del comprador:\nNombre: ${purchase.nombre} ${purchase.apellido}\nEmail: ${purchase.email}\nTeléfono: ${purchase.telefono}\nDirección: ${purchase.ciudad}, ${purchase.provincia} (CP: ${purchase.codigoPostal})\n\nProductos:\n${itemsList}\n\nTotal: $${total.toLocaleString("es-AR")}`,
+          });
+
+          await transporter.sendMail({
+            from: process.env.EMAIL_USER,
+            to: purchase.email,
+            subject: "¡Compra exitosa en La Taller!",
+            text: `Hola ${purchase.nombre},\n\nTu compra fue exitosa. Estos son tus productos:\n${itemsList}\n\nTotal: $${total.toLocaleString("es-AR")}\n\nPronto recibirás noticias por mail o teléfono con los datos del despacho.\n\n¡Gracias por confiar en La Taller!`,
+          });
+
+          console.log(`  Compra ${purchase.orderId} reconciliada - emails enviados.`);
+        } else if (paymentInfo.status === 'rejected' || paymentInfo.status === 'cancelled') {
+          await Purchase.findByIdAndUpdate(purchase._id, { status: 'rejected' });
+          await updatePurchaseStatus(purchase.orderId, 'rejected');
+          console.log(`  Pago ${purchase.orderId} rechazado/cancelado.`);
+        }
+      } catch (err) {
+        console.error(`  Error verificando order ${purchase.orderId}:`, err.message);
+      }
+    }
+
+    console.log("Reconciliación completada.");
+  } catch (error) {
+    console.error("Error en reconciliación:", error);
+  }
+}
+
+// Ejecutar reconciliación 5s después de arrancar
+setTimeout(() => reconcilePendingPurchases(), 5000);
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {

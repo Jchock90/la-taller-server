@@ -2,6 +2,7 @@ import express from 'express';
 import jwt from 'jsonwebtoken';
 import bcrypt from 'bcryptjs';
 import Product from '../models/Product.js';
+import Purchase from '../models/Purchase.js';
 import authMiddleware from '../middleware/auth.js';
 import { triggerSync } from '../syncService.js';
 
@@ -182,6 +183,129 @@ router.delete('/products/:id/permanent', authMiddleware, async (req, res) => {
   } catch (error) {
     console.error('Error eliminando producto permanentemente:', error);
     res.status(500).json({ error: 'Error al eliminar producto' });
+  }
+});
+
+// ============ VENTAS ============
+
+// GET /api/admin/sales - Listar ventas con filtros
+router.get('/sales', authMiddleware, async (req, res) => {
+  try {
+    const { status, from, to, search, page = 1, limit = 20 } = req.query;
+
+    const filter = {};
+    if (status) filter.status = status;
+    if (from || to) {
+      filter.createdAt = {};
+      if (from) filter.createdAt.$gte = new Date(from);
+      if (to) filter.createdAt.$lte = new Date(to + 'T23:59:59.999Z');
+    }
+    if (search) {
+      const s = search.trim();
+      filter.$or = [
+        { nombre: { $regex: s, $options: 'i' } },
+        { apellido: { $regex: s, $options: 'i' } },
+        { email: { $regex: s, $options: 'i' } },
+        { orderId: { $regex: s, $options: 'i' } },
+      ];
+    }
+
+    const skip = (Number(page) - 1) * Number(limit);
+    const [sales, total] = await Promise.all([
+      Purchase.find(filter).sort({ createdAt: -1 }).skip(skip).limit(Number(limit)),
+      Purchase.countDocuments(filter),
+    ]);
+
+    res.json({ sales, total, page: Number(page), pages: Math.ceil(total / Number(limit)) });
+  } catch (error) {
+    console.error('Error listando ventas:', error);
+    res.status(500).json({ error: 'Error al listar ventas' });
+  }
+});
+
+// GET /api/admin/sales/stats - Estadísticas de ventas
+router.get('/sales/stats', authMiddleware, async (req, res) => {
+  try {
+    const { from, to } = req.query;
+    const dateFilter = {};
+    if (from || to) {
+      dateFilter.createdAt = {};
+      if (from) dateFilter.createdAt.$gte = new Date(from);
+      if (to) dateFilter.createdAt.$lte = new Date(to + 'T23:59:59.999Z');
+    }
+
+    const approvedFilter = { ...dateFilter, status: 'approved' };
+
+    const [totalSales, totalRevenue, topProducts, salesByMonth] = await Promise.all([
+      Purchase.countDocuments(approvedFilter),
+      Purchase.aggregate([
+        { $match: approvedFilter },
+        { $group: { _id: null, total: { $sum: '$total' } } },
+      ]),
+      Purchase.aggregate([
+        { $match: approvedFilter },
+        { $unwind: '$items' },
+        { $group: { _id: '$items.title', qty: { $sum: '$items.quantity' }, revenue: { $sum: { $multiply: ['$items.unit_price', '$items.quantity'] } } } },
+        { $sort: { qty: -1 } },
+        { $limit: 10 },
+      ]),
+      Purchase.aggregate([
+        { $match: approvedFilter },
+        { $group: {
+          _id: { $dateToString: { format: '%Y-%m', date: '$createdAt' } },
+          count: { $sum: 1 },
+          revenue: { $sum: '$total' },
+        }},
+        { $sort: { _id: 1 } },
+      ]),
+    ]);
+
+    res.json({
+      totalSales,
+      totalRevenue: totalRevenue[0]?.total || 0,
+      topProducts,
+      salesByMonth,
+    });
+  } catch (error) {
+    console.error('Error obteniendo stats:', error);
+    res.status(500).json({ error: 'Error al obtener estadísticas' });
+  }
+});
+
+// PUT /api/admin/sales/:id/notes - Actualizar notas de una venta
+router.put('/sales/:id/notes', authMiddleware, async (req, res) => {
+  try {
+    const { notes } = req.body;
+    const sale = await Purchase.findByIdAndUpdate(
+      req.params.id,
+      { notes: notes || '' },
+      { returnDocument: 'after' }
+    );
+    if (!sale) return res.status(404).json({ error: 'Venta no encontrada' });
+    res.json(sale);
+  } catch (error) {
+    console.error('Error actualizando notas:', error);
+    res.status(500).json({ error: 'Error al actualizar notas' });
+  }
+});
+
+// PUT /api/admin/sales/:id/status - Cambiar estado de una venta
+router.put('/sales/:id/status', authMiddleware, async (req, res) => {
+  try {
+    const { status } = req.body;
+    const valid = ['approved', 'refunded'];
+    if (!valid.includes(status)) return res.status(400).json({ error: 'Estado inválido' });
+
+    const sale = await Purchase.findByIdAndUpdate(
+      req.params.id,
+      { status },
+      { returnDocument: 'after' }
+    );
+    if (!sale) return res.status(404).json({ error: 'Venta no encontrada' });
+    res.json(sale);
+  } catch (error) {
+    console.error('Error actualizando estado:', error);
+    res.status(500).json({ error: 'Error al actualizar estado' });
   }
 });
 
