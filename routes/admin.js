@@ -44,7 +44,11 @@ router.post('/upload', authMiddleware, upload.single('image'), async (req, res) 
       try {
         const parts = oldUrl.split('/upload/');
         if (parts[1]) {
-          const publicId = parts[1].replace(/^v\d+\//, '').replace(/\.[^.]+$/, '');
+          // Quitar transformaciones (ej: w_1200,c_limit,q_auto,f_auto/) y versión (v1234/)
+          const publicId = parts[1]
+            .replace(/^[a-z_0-9,]+\//, '')  // quitar transformaciones
+            .replace(/^v\d+\//, '')          // quitar versión
+            .replace(/\.[^.]+$/, '');        // quitar extensión
           await cloudinary.uploader.destroy(publicId);
         }
       } catch (delErr) {
@@ -56,8 +60,6 @@ router.post('/upload', authMiddleware, upload.single('image'), async (req, res) 
       const stream = cloudinary.uploader.upload_stream(
         {
           folder: 'lataller/productos',
-          quality: 'auto',
-          fetch_format: 'auto',
         },
         (error, result) => {
           if (error) reject(error);
@@ -67,7 +69,14 @@ router.post('/upload', authMiddleware, upload.single('image'), async (req, res) 
       stream.end(req.file.buffer);
     });
 
-    res.json({ url: result.secure_url });
+    // Insertar transformaciones en la URL para servir optimizada desde CDN
+    // w_1200: max 1200px ancho (suficiente para desktop), q_auto: calidad automática, f_auto: webp/avif si soporta
+    const optimizedUrl = result.secure_url.replace(
+      '/upload/',
+      '/upload/w_1200,c_limit,q_auto,f_auto/'
+    );
+
+    res.json({ url: optimizedUrl });
   } catch (error) {
     console.error('Error subiendo imagen:', error);
     res.status(500).json({ error: 'Error al subir imagen' });
@@ -90,7 +99,10 @@ router.post('/delete-image', authMiddleware, async (req, res) => {
 
     const parts = imageUrl.split('/upload/');
     if (parts[1]) {
-      const publicId = parts[1].replace(/^v\d+\//, '').replace(/\.[^.]+$/, '');
+      const publicId = parts[1]
+        .replace(/^[a-z_0-9,]+\//, '')
+        .replace(/^v\d+\//, '')
+        .replace(/\.[^.]+$/, '');
       await cloudinary.uploader.destroy(publicId);
     }
 
