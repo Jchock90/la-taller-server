@@ -400,7 +400,7 @@ router.put('/sales/:id/notes', authMiddleware, async (req, res) => {
 router.put('/sales/:id/status', authMiddleware, async (req, res) => {
   try {
     const { status } = req.body;
-    const valid = ['approved', 'refunded', 'pending', 'in_process', 'rejected'];
+    const valid = ['approved', 'refunded', 'pending', 'in_process', 'rejected', 'shipped'];
     if (!valid.includes(status)) return res.status(400).json({ error: 'Estado inválido' });
 
     const sale = await Purchase.findByIdAndUpdate(
@@ -414,6 +414,74 @@ router.put('/sales/:id/status', authMiddleware, async (req, res) => {
   } catch (error) {
     console.error('Error actualizando estado:', error);
     res.status(500).json({ error: 'Error al actualizar estado' });
+  }
+});
+
+// PUT /api/admin/sales/:id/tracking - Enviar link de seguimiento y marcar como despachado
+router.put('/sales/:id/tracking', authMiddleware, async (req, res) => {
+  try {
+    const { trackingUrl } = req.body;
+    if (!trackingUrl || !trackingUrl.trim()) {
+      return res.status(400).json({ error: 'El link de seguimiento es obligatorio' });
+    }
+
+    const normalizedUrl = trackingUrl.trim().startsWith('http') ? trackingUrl.trim() : `https://${trackingUrl.trim()}`;
+
+    const sale = await Purchase.findByIdAndUpdate(
+      req.params.id,
+      { trackingUrl: normalizedUrl, status: 'shipped', shippedAt: new Date() },
+      { returnDocument: 'after' }
+    );
+    if (!sale) return res.status(404).json({ error: 'Venta no encontrada' });
+
+    // Enviar email de seguimiento al comprador
+    try {
+      const nodemailer = (await import('nodemailer')).default;
+      const transporter = nodemailer.createTransport({
+        host: process.env.EMAIL_HOST,
+        port: process.env.EMAIL_PORT,
+        secure: false,
+        auth: { user: process.env.EMAIL_USER, pass: process.env.EMAIL_PASS },
+      });
+
+      const itemsList = sale.items.map(i =>
+        `<li style="padding:4px 0;color:#555;">${i.title} x${i.quantity}${i.talle ? ` - ${i.talle}` : ''}${i.color ? ` - ${i.color}` : ''}</li>`
+      ).join('');
+
+      await transporter.sendMail({
+        from: process.env.EMAIL_USER,
+        to: sale.email,
+        subject: '¡Tu pedido fue despachado! - La Taller',
+        html: `
+          <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;padding:20px;">
+            <h2 style="color:#333;">¡Hola ${sale.nombre}!</h2>
+            <p>Tu pedido ya fue <strong>despachado</strong> y está en camino.</p>
+            <div style="background:#f8f8f8;border-radius:8px;padding:16px;margin:20px 0;">
+              <h3 style="margin:0 0 10px;color:#333;font-size:14px;">Productos:</h3>
+              <ul style="margin:0;padding-left:20px;font-size:14px;">${itemsList}</ul>
+              <p style="margin:12px 0 0;font-weight:bold;color:#333;">Total: $${sale.total.toLocaleString('es-AR')}</p>
+            </div>
+            <p>Podés seguir el estado de tu envío haciendo clic en el siguiente botón:</p>
+            <div style="text-align:center;margin:25px 0;">
+              <a href="${trackingUrl.trim()}" style="background-color:#000;color:#fff;padding:14px 28px;text-decoration:none;border-radius:6px;font-weight:bold;display:inline-block;">
+                Seguir mi envío
+              </a>
+            </div>
+            <p style="font-size:12px;color:#999;margin-top:30px;">Si el botón no funciona, copiá y pegá este link en tu navegador:<br/><a href="${trackingUrl.trim()}" style="color:#666;">${trackingUrl.trim()}</a></p>
+          </div>
+        `,
+      });
+      console.log('Email de tracking enviado a:', sale.email);
+    } catch (emailErr) {
+      console.error('Error enviando email de tracking:', emailErr);
+      // No falla la request si el email falla — el tracking ya se guardó
+    }
+
+    syncPurchaseToAtlas(sale.toObject());
+    res.json(sale);
+  } catch (error) {
+    console.error('Error enviando tracking:', error);
+    res.status(500).json({ error: 'Error al enviar seguimiento' });
   }
 });
 

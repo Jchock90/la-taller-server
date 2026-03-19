@@ -2,6 +2,7 @@
 import express from "express";
 import crypto from "crypto";
 import cors from "cors";
+import jwt from "jsonwebtoken";
 import { MercadoPagoConfig, Preference, Payment } from "mercadopago";
 import dotenv from "dotenv";
 import nodemailer from "nodemailer";
@@ -9,9 +10,11 @@ import rateLimit from "express-rate-limit";
 import { addPurchaseRecord, getPurchaseRecord, updatePurchaseStatus, cleanOldRecords, loadPurchaseData } from "./dataStore.js";
 import connectDB from "./config/db.js";
 import productRoutes from "./routes/products.js";
-import adminRoutes from "./routes/admin.js";
-import Purchase from "./models/Purchase.js";
-import { syncPurchaseToAtlas } from "./syncService.js";
+import adminRoutes from './routes/admin.js';
+import userRoutes from './routes/users.js';
+import authMiddleware from './middleware/auth.js';
+import Purchase from './models/Purchase.js';
+import { syncPurchaseToAtlas } from './syncService.js';
 
 dotenv.config();
 
@@ -32,6 +35,11 @@ app.use(express.json());
 // Rutas de productos (público) y admin (protegido)
 app.use('/api/products', productRoutes);
 app.use('/api/admin', adminRoutes);
+
+// Rutas de usuarios (público + protegido)
+// Admin user management routes require admin auth
+app.use('/api/users/admin', authMiddleware);
+app.use('/api/users', userRoutes);
 
 const createPreferenceLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
@@ -102,11 +110,20 @@ function validatePurchaseData(data) {
 
 app.post("/create_preference", createPreferenceLimiter, async (req, res) => {
   try {
-    const { items, ...buyerData } = req.body;
+    const { items, userToken, ...buyerData } = req.body;
 
     const validation = validatePurchaseData(req.body);
     if (!validation.valid) {
       return res.status(400).json({ error: validation.error });
+    }
+
+    // Optionally extract userId from user token
+    let userId = null;
+    if (userToken) {
+      try {
+        const decoded = jwt.verify(userToken, process.env.JWT_SECRET);
+        if (decoded.userId) userId = decoded.userId;
+      } catch (_) { /* guest checkout */ }
     }
     
     const preference = new Preference(client);
@@ -140,19 +157,23 @@ app.post("/create_preference", createPreferenceLimiter, async (req, res) => {
 
     // Guardar también en MongoDB como respaldo inmediato
     const total = items.reduce((s, i) => s + i.unit_price * i.quantity, 0);
-    await Purchase.create({
+    const purchaseData = {
       orderId,
       status: 'pending',
       nombre: buyerData.nombre,
       apellido: buyerData.apellido,
       email: buyerData.email,
       telefono: buyerData.telefono,
+      direccion: buyerData.direccion || '',
+      pisoDepto: buyerData.pisoDepto || '',
+      codigoPostal: buyerData.codigoPostal,
       provincia: buyerData.provincia,
       ciudad: buyerData.ciudad,
-      codigoPostal: buyerData.codigoPostal,
       items,
       total,
-    });
+    };
+    if (userId) purchaseData.userId = userId;
+    await Purchase.create(purchaseData);
 
     syncPurchaseToAtlas({
       orderId,
@@ -161,9 +182,11 @@ app.post("/create_preference", createPreferenceLimiter, async (req, res) => {
       apellido: buyerData.apellido,
       email: buyerData.email,
       telefono: buyerData.telefono,
+      direccion: buyerData.direccion || '',
+      pisoDepto: buyerData.pisoDepto || '',
+      codigoPostal: buyerData.codigoPostal,
       provincia: buyerData.provincia,
       ciudad: buyerData.ciudad,
-      codigoPostal: buyerData.codigoPostal,
       items,
       total,
       createdAt: new Date(),
@@ -266,26 +289,63 @@ app.post("/webhook", webhookLimiter, async (req, res) => {
         }
       }
       
-      if (found && found.status !== 'approved') {
+      const protectedStatuses = ['approved', 'shipped', 'refunded'];
+      if (found && !protectedStatuses.includes(found.status)) {
         await updatePurchaseStatus(orderId, 'approved');
 
-        const itemsList = (found.items || [])
-          .map((i) => `- ${i.title} x${i.quantity} — $${(i.unit_price * i.quantity).toLocaleString("es-AR")}`)
-          .join("\n");
+        const itemsHtml = (found.items || [])
+          .map((i) => `<li style="padding:4px 0;color:#555;">${i.title} x${i.quantity} — $${(i.unit_price * i.quantity).toLocaleString("es-AR")}</li>`)
+          .join('');
         const total = (found.items || []).reduce((s, i) => s + i.unit_price * i.quantity, 0);
 
         await transporter.sendMail({
           from: process.env.EMAIL_USER,
           to: process.env.ADMIN_EMAIL,
           subject: `Nueva compra en La Taller`,
-          text: `Datos del comprador:\nNombre: ${found.nombre} ${found.apellido}\nEmail: ${found.email}\nTeléfono: ${found.telefono}\nDirección: ${found.ciudad}, ${found.provincia} (CP: ${found.codigoPostal})\n\nProductos:\n${itemsList}\n\nTotal: $${total.toLocaleString("es-AR")}`,
+          html: `
+            <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;padding:20px;">
+              <h2 style="color:#333;">Nueva compra recibida</h2>
+              <div style="background:#f8f8f8;border-radius:8px;padding:16px;margin:16px 0;">
+                <h3 style="margin:0 0 10px;color:#333;font-size:14px;">Datos del comprador:</h3>
+                <p style="margin:4px 0;font-size:14px;color:#555;"><strong>Nombre:</strong> ${found.nombre} ${found.apellido}</p>
+                <p style="margin:4px 0;font-size:14px;color:#555;"><strong>Email:</strong> ${found.email}</p>
+                <p style="margin:4px 0;font-size:14px;color:#555;"><strong>Teléfono:</strong> ${found.telefono}</p>
+                <p style="margin:4px 0;font-size:14px;color:#555;"><strong>Dirección:</strong> ${found.direccion || ''}${found.pisoDepto ? `, ${found.pisoDepto}` : ''}</p>
+                <p style="margin:4px 0;font-size:14px;color:#555;"><strong>Ubicación:</strong> ${found.ciudad}, ${found.provincia} (CP: ${found.codigoPostal})</p>
+              </div>
+              <div style="background:#f8f8f8;border-radius:8px;padding:16px;margin:16px 0;">
+                <h3 style="margin:0 0 10px;color:#333;font-size:14px;">Productos:</h3>
+                <ul style="margin:0;padding-left:20px;font-size:14px;">${itemsHtml}</ul>
+                <p style="margin:12px 0 0;font-weight:bold;color:#333;">Total: $${total.toLocaleString("es-AR")}</p>
+              </div>
+              <p style="font-size:12px;color:#999;margin-top:30px;">Order ID: ${orderId}</p>
+            </div>
+          `,
         });
 
         await transporter.sendMail({
           from: process.env.EMAIL_USER,
           to: found.email,
           subject: "¡Compra exitosa en La Taller!",
-          text: `Hola ${found.nombre},\n\nTu compra fue exitosa. Estos son tus productos:\n${itemsList}\n\nTotal: $${total.toLocaleString("es-AR")}\n\nPronto recibirás noticias por mail o teléfono con los datos del despacho.\n\n¡Gracias por confiar en La Taller!`,
+          html: `
+            <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;padding:20px;">
+              <h2 style="color:#333;">¡Hola ${found.nombre}!</h2>
+              <p style="color:#555;">Tu compra fue procesada con éxito. Estos son los detalles:</p>
+              <div style="background:#f8f8f8;border-radius:8px;padding:16px;margin:20px 0;">
+                <h3 style="margin:0 0 10px;color:#333;font-size:14px;">Productos:</h3>
+                <ul style="margin:0;padding-left:20px;font-size:14px;">${itemsHtml}</ul>
+                <p style="margin:12px 0 0;font-weight:bold;color:#333;">Total: $${total.toLocaleString("es-AR")}</p>
+              </div>
+              <div style="background:#f8f8f8;border-radius:8px;padding:16px;margin:16px 0;">
+                <h3 style="margin:0 0 10px;color:#333;font-size:14px;">Dirección de envío:</h3>
+                <p style="margin:4px 0;font-size:14px;color:#555;">${found.direccion || ''}${found.pisoDepto ? `, ${found.pisoDepto}` : ''}</p>
+                <p style="margin:4px 0;font-size:14px;color:#555;">${found.ciudad}, ${found.provincia} (CP: ${found.codigoPostal})</p>
+              </div>
+              <p style="color:#555;">Pronto recibirás noticias por mail o teléfono con los datos del despacho.</p>
+              <p style="color:#333;font-weight:bold;">¡Gracias por confiar en La Taller!</p>
+              <p style="font-size:12px;color:#999;margin-top:30px;">Si tenés alguna consulta, respondé este email o contactanos por WhatsApp.</p>
+            </div>
+          `,
         });
 
         // Guardar compra en MongoDB
@@ -312,7 +372,7 @@ app.post("/webhook", webhookLimiter, async (req, res) => {
         syncPurchaseToAtlas(approvedData);
         
         console.log("Pago aprobado - Emails enviados - Compra guardada en DB y Atlas");
-      } else if (found?.status === 'approved') {
+      } else if (protectedStatuses.includes(found?.status)) {
         console.log("Pago ya procesado anteriormente, ignorando duplicado.");
       } else {
         console.log("No se encontraron datos de compra para order:", orderId);
@@ -363,27 +423,69 @@ async function reconcilePendingPurchases() {
         console.log(`  Order ${purchase.orderId} (Payment ${purchase.paymentId}): Estado MP = ${paymentInfo.status}`);
 
         if (paymentInfo.status === 'approved') {
+          // No sobrescribir si ya fue despachado o reembolsado
+          if (['shipped', 'refunded'].includes(purchase.status)) {
+            console.log(`  Order ${purchase.orderId}: Ya tiene status ${purchase.status}, no se sobrescribe.`);
+            continue;
+          }
           await Purchase.findByIdAndUpdate(purchase._id, { status: 'approved' });
           await updatePurchaseStatus(purchase.orderId, 'approved');
           syncPurchaseToAtlas({ ...purchase.toObject(), status: 'approved' });
 
-          const itemsList = (purchase.items || [])
-            .map((i) => `- ${i.title} x${i.quantity} — $${(i.unit_price * i.quantity).toLocaleString("es-AR")}`)
-            .join("\n");
+          const itemsHtml = (purchase.items || [])
+            .map((i) => `<li style="padding:4px 0;color:#555;">${i.title} x${i.quantity} — $${(i.unit_price * i.quantity).toLocaleString("es-AR")}</li>`)
+            .join('');
           const total = purchase.total || purchase.items.reduce((s, i) => s + i.unit_price * i.quantity, 0);
 
           await transporter.sendMail({
             from: process.env.EMAIL_USER,
             to: process.env.ADMIN_EMAIL,
             subject: `Nueva compra en La Taller (reconciliada)`,
-            text: `Esta compra fue aprobada mientras el servidor estaba apagado.\n\nDatos del comprador:\nNombre: ${purchase.nombre} ${purchase.apellido}\nEmail: ${purchase.email}\nTeléfono: ${purchase.telefono}\nDirección: ${purchase.ciudad}, ${purchase.provincia} (CP: ${purchase.codigoPostal})\n\nProductos:\n${itemsList}\n\nTotal: $${total.toLocaleString("es-AR")}`,
+            html: `
+              <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;padding:20px;">
+                <h2 style="color:#333;">Nueva compra reconciliada</h2>
+                <p style="color:#555;font-size:14px;">Esta compra fue aprobada mientras el servidor estaba apagado.</p>
+                <div style="background:#f8f8f8;border-radius:8px;padding:16px;margin:16px 0;">
+                  <h3 style="margin:0 0 10px;color:#333;font-size:14px;">Datos del comprador:</h3>
+                  <p style="margin:4px 0;font-size:14px;color:#555;"><strong>Nombre:</strong> ${purchase.nombre} ${purchase.apellido}</p>
+                  <p style="margin:4px 0;font-size:14px;color:#555;"><strong>Email:</strong> ${purchase.email}</p>
+                  <p style="margin:4px 0;font-size:14px;color:#555;"><strong>Teléfono:</strong> ${purchase.telefono}</p>
+                  <p style="margin:4px 0;font-size:14px;color:#555;"><strong>Dirección:</strong> ${purchase.direccion || ''}${purchase.pisoDepto ? `, ${purchase.pisoDepto}` : ''}</p>
+                  <p style="margin:4px 0;font-size:14px;color:#555;"><strong>Ubicación:</strong> ${purchase.ciudad}, ${purchase.provincia} (CP: ${purchase.codigoPostal})</p>
+                </div>
+                <div style="background:#f8f8f8;border-radius:8px;padding:16px;margin:16px 0;">
+                  <h3 style="margin:0 0 10px;color:#333;font-size:14px;">Productos:</h3>
+                  <ul style="margin:0;padding-left:20px;font-size:14px;">${itemsHtml}</ul>
+                  <p style="margin:12px 0 0;font-weight:bold;color:#333;">Total: $${total.toLocaleString("es-AR")}</p>
+                </div>
+                <p style="font-size:12px;color:#999;margin-top:30px;">Order ID: ${purchase.orderId}</p>
+              </div>
+            `,
           });
 
           await transporter.sendMail({
             from: process.env.EMAIL_USER,
             to: purchase.email,
             subject: "¡Compra exitosa en La Taller!",
-            text: `Hola ${purchase.nombre},\n\nTu compra fue exitosa. Estos son tus productos:\n${itemsList}\n\nTotal: $${total.toLocaleString("es-AR")}\n\nPronto recibirás noticias por mail o teléfono con los datos del despacho.\n\n¡Gracias por confiar en La Taller!`,
+            html: `
+              <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;padding:20px;">
+                <h2 style="color:#333;">¡Hola ${purchase.nombre}!</h2>
+                <p style="color:#555;">Tu compra fue procesada con éxito. Estos son los detalles:</p>
+                <div style="background:#f8f8f8;border-radius:8px;padding:16px;margin:20px 0;">
+                  <h3 style="margin:0 0 10px;color:#333;font-size:14px;">Productos:</h3>
+                  <ul style="margin:0;padding-left:20px;font-size:14px;">${itemsHtml}</ul>
+                  <p style="margin:12px 0 0;font-weight:bold;color:#333;">Total: $${total.toLocaleString("es-AR")}</p>
+                </div>
+                <div style="background:#f8f8f8;border-radius:8px;padding:16px;margin:16px 0;">
+                  <h3 style="margin:0 0 10px;color:#333;font-size:14px;">Dirección de envío:</h3>
+                  <p style="margin:4px 0;font-size:14px;color:#555;">${purchase.direccion || ''}${purchase.pisoDepto ? `, ${purchase.pisoDepto}` : ''}</p>
+                  <p style="margin:4px 0;font-size:14px;color:#555;">${purchase.ciudad}, ${purchase.provincia} (CP: ${purchase.codigoPostal})</p>
+                </div>
+                <p style="color:#555;">Pronto recibirás noticias por mail o teléfono con los datos del despacho.</p>
+                <p style="color:#333;font-weight:bold;">¡Gracias por confiar en La Taller!</p>
+                <p style="font-size:12px;color:#999;margin-top:30px;">Si tenés alguna consulta, respondé este email o contactanos por WhatsApp.</p>
+              </div>
+            `,
           });
 
           console.log(`  Compra ${purchase.orderId} reconciliada - emails enviados.`);
