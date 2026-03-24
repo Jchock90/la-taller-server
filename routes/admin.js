@@ -575,10 +575,10 @@ router.post('/email/send', authMiddleware, async (req, res) => {
     let recipients = [];
 
     if (type === 'newsletter') {
-      const users = await User.find({ emailVerified: true }).select('email');
+      const users = await User.find().select('email');
       recipients = users.map(u => u.email);
       if (recipients.length === 0) {
-        return res.status(400).json({ error: 'No hay usuarios verificados para enviar' });
+        return res.status(400).json({ error: 'No hay usuarios registrados para enviar' });
       }
     } else if (type === 'individual') {
       if (!to || !to.trim()) {
@@ -676,7 +676,7 @@ router.delete('/email/sent/:id', authMiddleware, async (req, res) => {
 // GET /api/admin/email/recipients - Obtener lista de destinatarios posibles
 router.get('/email/recipients', authMiddleware, async (req, res) => {
   try {
-    const users = await User.find().select('nombre apellido email emailVerified googleId').lean();
+    const users = await User.find().select('nombre apellido email googleId').lean();
     // También agregar compradores sin cuenta (emails únicos de purchases que no son users)
     const userEmails = new Set(users.map(u => u.email.toLowerCase()));
     const guestPurchases = await Purchase.aggregate([
@@ -690,7 +690,7 @@ router.get('/email/recipients', authMiddleware, async (req, res) => {
     res.json({
       users: users.map(u => ({ ...u, isGuest: false })),
       guests,
-      totalVerified: users.filter(u => u.emailVerified).length,
+      total: users.length,
     });
   } catch (error) {
     console.error('Error obteniendo destinatarios:', error);

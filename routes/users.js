@@ -1,37 +1,11 @@
 import express from 'express';
 import jwt from 'jsonwebtoken';
-import crypto from 'crypto';
-import nodemailer from 'nodemailer';
 import rateLimit from 'express-rate-limit';
 import User from '../models/User.js';
 import Purchase from '../models/Purchase.js';
 import userAuth from '../middleware/userAuth.js';
 
 const router = express.Router();
-
-let _transporter;
-function getTransporter() {
-  if (!_transporter) {
-    _transporter = nodemailer.createTransport({
-      host: process.env.EMAIL_HOST,
-      port: 465,
-      secure: true,
-      auth: {
-        user: process.env.EMAIL_USER,
-        pass: process.env.EMAIL_PASS,
-      },
-      tls: { rejectUnauthorized: false },
-    });
-  }
-  return _transporter;
-}
-
-function sendMailWithTimeout(mailOptions, timeoutMs = 10000) {
-  return Promise.race([
-    getTransporter().sendMail(mailOptions),
-    new Promise((_, reject) => setTimeout(() => reject(new Error('Email timeout')), timeoutMs)),
-  ]);
-}
 
 function generateToken(user) {
   return jwt.sign(
@@ -76,129 +50,18 @@ router.post('/register', registerLimiter, async (req, res) => {
       return res.status(409).json({ error: 'Ya existe una cuenta con este email' });
     }
 
-    const verificationToken = crypto.randomBytes(32).toString('hex');
-    const verificationExpires = new Date(Date.now() + 24 * 60 * 60 * 1000); // 24h
-
     const user = await User.create({
       nombre: nombre.trim(),
       apellido: apellido.trim(),
       email: email.toLowerCase().trim(),
       password,
-      verificationToken,
-      verificationExpires,
     });
 
-    // Send verification email
-    const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:5173';
-    const verifyUrl = `${frontendUrl}/verificar-email?token=${verificationToken}`;
-
-    try {
-      await sendMailWithTimeout({
-        from: process.env.EMAIL_USER,
-        to: user.email,
-        subject: 'Verifica tu email - La Taller',
-        html: `
-          <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
-            <h2 style="color: #333;">¡Hola ${user.nombre}!</h2>
-            <p>Gracias por registrarte en <strong>La Taller</strong>.</p>
-            <p>Para completar tu registro, verifica tu email haciendo clic en el siguiente botón:</p>
-            <div style="text-align: center; margin: 30px 0;">
-              <a href="${verifyUrl}" style="background-color: #000; color: #fff; padding: 14px 28px; text-decoration: none; border-radius: 6px; font-weight: bold;">
-                Verificar mi email
-              </a>
-            </div>
-            <p style="color: #666; font-size: 14px;">Si no creaste esta cuenta, puedes ignorar este email.</p>
-            <p style="color: #666; font-size: 14px;">Este enlace expira en 24 horas.</p>
-          </div>
-        `,
-      });
-      res.status(201).json({ message: 'Cuenta creada. Revisa tu email para verificar tu cuenta.' });
-    } catch (emailErr) {
-      console.error('Error enviando email de verificación:', emailErr);
-      res.status(201).json({ message: 'Cuenta creada, pero hubo un problema enviando el email. Usa "Reenviar verificación" para intentar de nuevo.' });
-    }
+    const token = generateToken(user);
+    res.status(201).json({ message: 'Cuenta creada exitosamente.', token, user });
   } catch (error) {
     console.error('Error en registro:', error);
     res.status(500).json({ error: 'Error al crear la cuenta' });
-  }
-});
-
-// ── VERIFICAR EMAIL ───────────────────────────────────────
-router.get('/verify-email', async (req, res) => {
-  try {
-    const { token } = req.query;
-    if (!token) {
-      return res.status(400).json({ error: 'Token de verificación requerido' });
-    }
-
-    const user = await User.findOne({
-      verificationToken: token,
-      verificationExpires: { $gt: new Date() },
-    });
-
-    if (!user) {
-      return res.status(400).json({ error: 'Token inválido o expirado' });
-    }
-
-    user.emailVerified = true;
-    user.verificationToken = undefined;
-    user.verificationExpires = undefined;
-    await user.save();
-
-    // Link existing purchases by email
-    await Purchase.updateMany(
-      { email: user.email, userId: { $exists: false } },
-      { $set: { userId: user._id } }
-    );
-
-    const authToken = generateToken(user);
-    res.json({ message: 'Email verificado correctamente', token: authToken, user });
-  } catch (error) {
-    console.error('Error verificando email:', error);
-    res.status(500).json({ error: 'Error al verificar el email' });
-  }
-});
-
-// ── REENVIAR VERIFICACIÓN ─────────────────────────────────
-router.post('/resend-verification', registerLimiter, async (req, res) => {
-  try {
-    const { email } = req.body;
-    if (!email) return res.status(400).json({ error: 'Email requerido' });
-
-    const user = await User.findOne({ email: email.toLowerCase() });
-    if (!user) return res.json({ message: 'Si el email existe, recibirás un nuevo enlace.' });
-    if (user.emailVerified) return res.json({ message: 'Tu email ya está verificado.' });
-
-    const verificationToken = crypto.randomBytes(32).toString('hex');
-    user.verificationToken = verificationToken;
-    user.verificationExpires = new Date(Date.now() + 24 * 60 * 60 * 1000);
-    await user.save();
-
-    const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:5173';
-    const verifyUrl = `${frontendUrl}/verificar-email?token=${verificationToken}`;
-
-    await sendMailWithTimeout({
-      from: process.env.EMAIL_USER,
-      to: user.email,
-      subject: 'Verifica tu email - La Taller',
-      html: `
-        <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
-          <h2 style="color: #333;">¡Hola ${user.nombre}!</h2>
-          <p>Aquí tienes un nuevo enlace para verificar tu email:</p>
-          <div style="text-align: center; margin: 30px 0;">
-            <a href="${verifyUrl}" style="background-color: #000; color: #fff; padding: 14px 28px; text-decoration: none; border-radius: 6px; font-weight: bold;">
-              Verificar mi email
-            </a>
-          </div>
-          <p style="color: #666; font-size: 14px;">Este enlace expira en 24 horas.</p>
-        </div>
-      `,
-    });
-
-    res.json({ message: 'Si el email existe, recibirás un nuevo enlace.' });
-  } catch (error) {
-    console.error('Error reenviando verificación:', error);
-    res.status(500).json({ error: 'Error al reenviar verificación' });
   }
 });
 
@@ -218,10 +81,6 @@ router.post('/login', loginLimiter, async (req, res) => {
     const isMatch = await user.comparePassword(password);
     if (!isMatch) {
       return res.status(401).json({ error: 'Credenciales incorrectas' });
-    }
-
-    if (!user.emailVerified) {
-      return res.status(403).json({ error: 'Debes verificar tu email antes de iniciar sesión', needsVerification: true });
     }
 
     const token = generateToken(user);
@@ -262,10 +121,6 @@ router.post('/google', async (req, res) => {
       if (!user.googleId) {
         user.googleId = googleId;
       }
-      // Google accounts are always verified
-      if (!user.emailVerified) {
-        user.emailVerified = true;
-      }
       await user.save();
     } else {
       user = await User.create({
@@ -273,7 +128,6 @@ router.post('/google', async (req, res) => {
         apellido: family_name || '',
         email: email.toLowerCase(),
         googleId,
-        emailVerified: true,
       });
     }
 
@@ -326,7 +180,7 @@ router.get('/my-purchases', userAuth, async (req, res) => {
 // ── ADMIN: LISTAR USUARIOS ───────────────────────────────
 router.get('/admin/list', async (req, res) => {
   try {
-    const users = await User.find().sort({ createdAt: -1 }).select('-password -verificationToken -verificationExpires -resetPasswordToken -resetPasswordExpires').lean();
+    const users = await User.find().sort({ createdAt: -1 }).select('-password -resetPasswordToken -resetPasswordExpires').lean();
 
     // Aggregate purchase stats per user
     const purchaseStats = await Purchase.aggregate([
