@@ -10,8 +10,18 @@ export function getTransporter() {
     const apiKey = process.env.RESEND_API_KEY;
     _transporter = {
       sendMail: async (opts) => {
+        // Normalize from address for Resend API
+        let from = opts.from || getFromAddress();
+        if (typeof from === 'string') {
+          from = from.replace(/^"|"$/g, '').trim(); // strip quotes
+          if (!from.includes('<') && from.includes('@')) {
+            from = `La Taller <${from}>`;
+          }
+        }
+        console.log('📧 Resend from:', from, '| to:', opts.to);
+
         const body = {
-          from: opts.from,
+          from,
           to: Array.isArray(opts.to) ? opts.to : [opts.to],
           subject: opts.subject,
         };
