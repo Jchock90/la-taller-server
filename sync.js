@@ -52,6 +52,21 @@ async function sync() {
   }
   console.log(`✅ ${sentEmails.length} emails sincronizados con Atlas`);
 
+  // Sync usuarios
+  const users = await mongoose.connection.db.collection('users').find({}).toArray();
+  console.log(`👥 ${users.length} usuarios encontrados localmente`);
+
+  const atlasUsers = atlasConn.db.collection('users');
+  for (const user of users) {
+    const { _id, ...userData } = user;
+    await atlasUsers.updateOne(
+      { email: user.email },
+      { $set: userData },
+      { upsert: true }
+    );
+  }
+  console.log(`✅ ${users.length} usuarios sincronizados con Atlas`);
+
   await atlasConn.close();
   await mongoose.disconnect();
 }
