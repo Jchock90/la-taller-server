@@ -14,15 +14,23 @@ function getTransporter() {
   if (!_transporter) {
     _transporter = nodemailer.createTransport({
       host: process.env.EMAIL_HOST,
-      port: process.env.EMAIL_PORT,
-      secure: false,
+      port: 465,
+      secure: true,
       auth: {
         user: process.env.EMAIL_USER,
         pass: process.env.EMAIL_PASS,
       },
+      tls: { rejectUnauthorized: false },
     });
   }
   return _transporter;
+}
+
+function sendMailWithTimeout(mailOptions, timeoutMs = 10000) {
+  return Promise.race([
+    getTransporter().sendMail(mailOptions),
+    new Promise((_, reject) => setTimeout(() => reject(new Error('Email timeout')), timeoutMs)),
+  ]);
 }
 
 function generateToken(user) {
@@ -80,31 +88,35 @@ router.post('/register', registerLimiter, async (req, res) => {
       verificationExpires,
     });
 
-    // Send verification email (non-blocking so registration succeeds even if email fails)
+    // Send verification email
     const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:5173';
     const verifyUrl = `${frontendUrl}/verificar-email?token=${verificationToken}`;
 
-    getTransporter().sendMail({
-      from: process.env.EMAIL_USER,
-      to: user.email,
-      subject: 'Verifica tu email - La Taller',
-      html: `
-        <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
-          <h2 style="color: #333;">¡Hola ${user.nombre}!</h2>
-          <p>Gracias por registrarte en <strong>La Taller</strong>.</p>
-          <p>Para completar tu registro, verifica tu email haciendo clic en el siguiente botón:</p>
-          <div style="text-align: center; margin: 30px 0;">
-            <a href="${verifyUrl}" style="background-color: #000; color: #fff; padding: 14px 28px; text-decoration: none; border-radius: 6px; font-weight: bold;">
-              Verificar mi email
-            </a>
+    try {
+      await sendMailWithTimeout({
+        from: process.env.EMAIL_USER,
+        to: user.email,
+        subject: 'Verifica tu email - La Taller',
+        html: `
+          <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
+            <h2 style="color: #333;">¡Hola ${user.nombre}!</h2>
+            <p>Gracias por registrarte en <strong>La Taller</strong>.</p>
+            <p>Para completar tu registro, verifica tu email haciendo clic en el siguiente botón:</p>
+            <div style="text-align: center; margin: 30px 0;">
+              <a href="${verifyUrl}" style="background-color: #000; color: #fff; padding: 14px 28px; text-decoration: none; border-radius: 6px; font-weight: bold;">
+                Verificar mi email
+              </a>
+            </div>
+            <p style="color: #666; font-size: 14px;">Si no creaste esta cuenta, puedes ignorar este email.</p>
+            <p style="color: #666; font-size: 14px;">Este enlace expira en 24 horas.</p>
           </div>
-          <p style="color: #666; font-size: 14px;">Si no creaste esta cuenta, puedes ignorar este email.</p>
-          <p style="color: #666; font-size: 14px;">Este enlace expira en 24 horas.</p>
-        </div>
-      `,
-    }).catch(err => console.error('Error enviando email de verificación:', err));
-
-    res.status(201).json({ message: 'Cuenta creada. Revisa tu email para verificar tu cuenta.' });
+        `,
+      });
+      res.status(201).json({ message: 'Cuenta creada. Revisa tu email para verificar tu cuenta.' });
+    } catch (emailErr) {
+      console.error('Error enviando email de verificación:', emailErr);
+      res.status(201).json({ message: 'Cuenta creada, pero hubo un problema enviando el email. Usa "Reenviar verificación" para intentar de nuevo.' });
+    }
   } catch (error) {
     console.error('Error en registro:', error);
     res.status(500).json({ error: 'Error al crear la cuenta' });
@@ -165,7 +177,7 @@ router.post('/resend-verification', registerLimiter, async (req, res) => {
     const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:5173';
     const verifyUrl = `${frontendUrl}/verificar-email?token=${verificationToken}`;
 
-    getTransporter().sendMail({
+    await sendMailWithTimeout({
       from: process.env.EMAIL_USER,
       to: user.email,
       subject: 'Verifica tu email - La Taller',
@@ -181,7 +193,7 @@ router.post('/resend-verification', registerLimiter, async (req, res) => {
           <p style="color: #666; font-size: 14px;">Este enlace expira en 24 horas.</p>
         </div>
       `,
-    }).catch(err => console.error('Error reenviando email de verificación:', err));
+    });
 
     res.json({ message: 'Si el email existe, recibirás un nuevo enlace.' });
   } catch (error) {
