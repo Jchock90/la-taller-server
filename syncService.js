@@ -56,3 +56,51 @@ export function syncPurchaseToAtlas(purchaseDoc) {
     }
   });
 }
+
+export function syncSentEmailToAtlas(emailDoc) {
+  const atlasUri = process.env.ATLAS_URI;
+  if (!atlasUri) return;
+
+  setImmediate(async () => {
+    let atlasConn;
+    try {
+      atlasConn = await mongoose.createConnection(atlasUri).asPromise();
+      const atlasColl = atlasConn.db.collection('sentemails');
+
+      const { _id, ...data } = emailDoc;
+      const localId = _id.toString();
+      await atlasColl.updateOne(
+        { localId },
+        { $set: { ...data, localId } },
+        { upsert: true }
+      );
+
+      console.log(`☁️  Sync: Email "${data.subject}" → Atlas`);
+    } catch (err) {
+      console.error('☁️  Sync email error:', err.message);
+    } finally {
+      if (atlasConn) await atlasConn.close();
+    }
+  });
+}
+
+export function deleteSentEmailFromAtlas(emailId) {
+  const atlasUri = process.env.ATLAS_URI;
+  if (!atlasUri) return;
+
+  setImmediate(async () => {
+    let atlasConn;
+    try {
+      atlasConn = await mongoose.createConnection(atlasUri).asPromise();
+      const atlasColl = atlasConn.db.collection('sentemails');
+
+      await atlasColl.deleteOne({ localId: emailId.toString() });
+
+      console.log(`☁️  Sync: Email eliminado → Atlas`);
+    } catch (err) {
+      console.error('☁️  Sync delete email error:', err.message);
+    } finally {
+      if (atlasConn) await atlasConn.close();
+    }
+  });
+}

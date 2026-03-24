@@ -40,6 +40,18 @@ async function sync() {
   }
   console.log(`✅ ${purchases.length} compras sincronizadas con Atlas`);
 
+  // Sync emails enviados
+  const sentEmails = await mongoose.connection.db.collection('sentemails').find({}).toArray();
+  console.log(`📧 ${sentEmails.length} emails encontrados localmente`);
+
+  const atlasEmails = atlasConn.db.collection('sentemails');
+  await atlasEmails.deleteMany({});
+  for (const email of sentEmails) {
+    const { _id, ...emailData } = email;
+    await atlasEmails.insertOne({ ...emailData, localId: _id.toString() });
+  }
+  console.log(`✅ ${sentEmails.length} emails sincronizados con Atlas`);
+
   await atlasConn.close();
   await mongoose.disconnect();
 }

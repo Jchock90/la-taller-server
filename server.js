@@ -30,7 +30,7 @@ const corsOptions = {
   optionsSuccessStatus: 200
 };
 app.use(cors(corsOptions));
-app.use(express.json());
+app.use(express.json({ limit: '10mb' }));
 
 // Rutas de productos (público) y admin (protegido)
 app.use('/api/products', productRoutes);

@@ -2,11 +2,14 @@ import express from 'express';
 import jwt from 'jsonwebtoken';
 import bcrypt from 'bcryptjs';
 import multer from 'multer';
+import nodemailer from 'nodemailer';
 import { v2 as cloudinary } from 'cloudinary';
 import Product from '../models/Product.js';
 import Purchase from '../models/Purchase.js';
+import User from '../models/User.js';
+import SentEmail from '../models/SentEmail.js';
 import authMiddleware from '../middleware/auth.js';
-import { triggerSync, syncPurchaseToAtlas } from '../syncService.js';
+import { triggerSync, syncPurchaseToAtlas, syncSentEmailToAtlas, deleteSentEmailFromAtlas } from '../syncService.js';
 
 const router = express.Router();
 
@@ -340,7 +343,7 @@ router.get('/sales/stats', authMiddleware, async (req, res) => {
       if (to) dateFilter.createdAt.$lte = new Date(to + 'T23:59:59.999Z');
     }
 
-    const approvedFilter = { ...dateFilter, status: 'approved' };
+    const approvedFilter = { ...dateFilter, status: { $in: ['approved', 'shipped'] } };
 
     const [totalSales, totalRevenue, topProducts, salesByMonth] = await Promise.all([
       Purchase.countDocuments(approvedFilter),
@@ -509,6 +512,189 @@ router.delete('/sales/:id', authMiddleware, async (req, res) => {
   } catch (error) {
     console.error('Error eliminando venta:', error);
     res.status(500).json({ error: 'Error al eliminar venta' });
+  }
+});
+
+// ────────── EMAIL ENDPOINTS ──────────
+
+function getTransporter() {
+  return nodemailer.createTransport({
+    host: process.env.EMAIL_HOST,
+    port: process.env.EMAIL_PORT,
+    secure: false,
+    auth: { user: process.env.EMAIL_USER, pass: process.env.EMAIL_PASS },
+  });
+}
+
+function buildEmailHtml(subject, body, footerText, richHtml) {
+  const content = richHtml
+    ? richHtml
+    : `<div style="color:#555;font-size:15px;line-height:1.7;white-space:pre-line;">${body}</div>`;
+  return `
+    <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;padding:20px;text-align:left;">
+      <h2 style="color:#333;text-align:left;">${subject}</h2>
+      ${content}
+      ${footerText ? `<p style="font-size:12px;color:#999;margin-top:30px;border-top:1px solid #eee;padding-top:15px;text-align:left;">${footerText}</p>` : ''}
+      <p style="font-size:11px;color:#bbb;margin-top:20px;text-align:left;">— La Taller</p>
+    </div>
+  `;
+}
+
+// POST /api/admin/email/send - Enviar email individual o masivo
+router.post('/email/send', authMiddleware, async (req, res) => {
+  try {
+    const { to, subject, body, html, attachments: clientAttachments, type } = req.body;
+
+    if (!subject || !subject.trim()) {
+      return res.status(400).json({ error: 'El asunto es obligatorio' });
+    }
+    if (!body && !html) {
+      return res.status(400).json({ error: 'El cuerpo del mensaje es obligatorio' });
+    }
+
+    const transporter = getTransporter();
+    const emailHtml = buildEmailHtml(subject.trim(), body ? body.trim() : '', type === 'newsletter' ? 'Recibiste este email porque estás registrado en La Taller.' : '', html || null);
+
+    // Convert base64 data URIs to CID inline attachments for nodemailer
+    const cidAttachments = (clientAttachments || []).map(att => {
+      const commaIdx = att.dataUri.indexOf(',');
+      const header = att.dataUri.slice(0, commaIdx);
+      const base64Data = att.dataUri.slice(commaIdx + 1);
+      const mimeMatch = header.match(/data:(image\/[^;]+);/);
+      const mimeType = mimeMatch ? mimeMatch[1] : 'image/png';
+      const ext = mimeType.split('/')[1];
+      return {
+        filename: `${att.cid}.${ext}`,
+        content: Buffer.from(base64Data, 'base64'),
+        cid: att.cid,
+        contentType: mimeType,
+        contentDisposition: 'inline',
+      };
+    });
+
+    let recipients = [];
+
+    if (type === 'newsletter') {
+      const users = await User.find({ emailVerified: true }).select('email');
+      recipients = users.map(u => u.email);
+      if (recipients.length === 0) {
+        return res.status(400).json({ error: 'No hay usuarios verificados para enviar' });
+      }
+    } else if (type === 'individual') {
+      if (!to || !to.trim()) {
+        return res.status(400).json({ error: 'El destinatario es obligatorio' });
+      }
+      recipients = [to.trim()];
+    } else if (type === 'selected') {
+      if (!Array.isArray(to) || to.length === 0) {
+        return res.status(400).json({ error: 'Selecciona al menos un destinatario' });
+      }
+      recipients = to.map(e => e.trim()).filter(Boolean);
+    } else {
+      return res.status(400).json({ error: 'Tipo de envío inválido' });
+    }
+
+    let sent = 0;
+    let failed = 0;
+    const errors = [];
+
+    for (let i = 0; i < recipients.length; i += 5) {
+      const batch = recipients.slice(i, i + 5);
+      const results = await Promise.allSettled(
+        batch.map(email =>
+          transporter.sendMail({
+            from: process.env.EMAIL_USER,
+            to: email,
+            subject: subject.trim(),
+            html: emailHtml,
+            attachments: cidAttachments,
+          })
+        )
+      );
+      results.forEach((r, idx) => {
+        if (r.status === 'fulfilled') {
+          sent++;
+        } else {
+          failed++;
+          errors.push({ email: batch[idx], error: r.reason?.message || 'Error desconocido' });
+        }
+      });
+    }
+
+    // Save to email history
+    try {
+      const savedEmail = await SentEmail.create({
+        subject: subject.trim(),
+        bodyPreview: (body || '').slice(0, 200),
+        recipients,
+        type,
+        sent,
+        failed,
+        hasImages: cidAttachments.length > 0,
+      });
+      syncSentEmailToAtlas(savedEmail.toObject());
+    } catch (histErr) {
+      console.error('Error guardando historial de email:', histErr);
+    }
+
+    console.log(`Email enviado: ${sent} exitosos, ${failed} fallidos (tipo: ${type})`);
+    res.json({ sent, failed, total: recipients.length, errors: errors.slice(0, 10) });
+  } catch (error) {
+    console.error('Error enviando email:', error);
+    res.status(500).json({ error: 'Error al enviar email' });
+  }
+});
+
+// GET /api/admin/email/sent - Historial de emails enviados
+router.get('/email/sent', authMiddleware, async (req, res) => {
+  try {
+    const emails = await SentEmail.find()
+      .sort({ createdAt: -1 })
+      .limit(50)
+      .lean();
+    res.json(emails);
+  } catch (error) {
+    console.error('Error obteniendo historial:', error);
+    res.status(500).json({ error: 'Error al obtener historial' });
+  }
+});
+
+// DELETE /api/admin/email/sent/:id - Eliminar email del historial
+router.delete('/email/sent/:id', authMiddleware, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const deleted = await SentEmail.findByIdAndDelete(id);
+    if (!deleted) return res.status(404).json({ error: 'Email no encontrado' });
+    deleteSentEmailFromAtlas(id);
+    res.json({ ok: true });
+  } catch (error) {
+    console.error('Error eliminando email:', error);
+    res.status(500).json({ error: 'Error al eliminar email' });
+  }
+});
+
+// GET /api/admin/email/recipients - Obtener lista de destinatarios posibles
+router.get('/email/recipients', authMiddleware, async (req, res) => {
+  try {
+    const users = await User.find().select('nombre apellido email emailVerified googleId').lean();
+    // También agregar compradores sin cuenta (emails únicos de purchases que no son users)
+    const userEmails = new Set(users.map(u => u.email.toLowerCase()));
+    const guestPurchases = await Purchase.aggregate([
+      { $match: { status: { $in: ['approved', 'shipped'] } } },
+      { $group: { _id: { $toLower: '$email' }, nombre: { $first: '$nombre' }, apellido: { $first: '$apellido' }, email: { $first: '$email' } } },
+    ]);
+    const guests = guestPurchases
+      .filter(g => !userEmails.has(g._id))
+      .map(g => ({ nombre: g.nombre, apellido: g.apellido, email: g.email, isGuest: true }));
+
+    res.json({
+      users: users.map(u => ({ ...u, isGuest: false })),
+      guests,
+      totalVerified: users.filter(u => u.emailVerified).length,
+    });
+  } catch (error) {
+    console.error('Error obteniendo destinatarios:', error);
+    res.status(500).json({ error: 'Error al obtener destinatarios' });
   }
 });
 
