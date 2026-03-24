@@ -14,9 +14,12 @@ export function getTransporter() {
         let from = opts.from || getFromAddress();
         if (typeof from === 'string') {
           from = from.replace(/^"|"$/g, '').trim(); // strip quotes
-          if (!from.includes('<') && from.includes('@')) {
-            from = `La Taller <${from}>`;
-          }
+          // Extract email from <email> format or bare email
+          const match = from.match(/<([^>]+)>/);
+          const nameMatch = from.match(/^([^<]+)</);
+          const email = match ? match[1] : from;
+          const name = nameMatch ? nameMatch[1].trim() : '';
+          from = name ? `${name} <${email}>` : `La Taller <${email}>`;
         }
         console.log('📧 Resend from:', from, '| to:', opts.to);
 
