@@ -61,7 +61,11 @@ export function getTransporter() {
 
 export function getFromAddress() {
   if (process.env.RESEND_API_KEY) {
-    return process.env.EMAIL_FROM || 'La Taller <noreply@lataller.com.ar>';
+    const from = process.env.EMAIL_FROM || 'noreply@lataller.com.ar';
+    // Ensure valid format: "Name <email>" or "email@domain"
+    if (from.includes('<') && from.includes('>')) return from;
+    if (from.includes('@')) return `La Taller <${from}>`;
+    return 'La Taller <noreply@lataller.com.ar>';
   }
   return process.env.EMAIL_USER;
 }
