@@ -80,11 +80,11 @@ router.post('/register', registerLimiter, async (req, res) => {
       verificationExpires,
     });
 
-    // Send verification email
+    // Send verification email (non-blocking so registration succeeds even if email fails)
     const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:5173';
     const verifyUrl = `${frontendUrl}/verificar-email?token=${verificationToken}`;
 
-    await getTransporter().sendMail({
+    getTransporter().sendMail({
       from: process.env.EMAIL_USER,
       to: user.email,
       subject: 'Verifica tu email - La Taller',
@@ -102,7 +102,7 @@ router.post('/register', registerLimiter, async (req, res) => {
           <p style="color: #666; font-size: 14px;">Este enlace expira en 24 horas.</p>
         </div>
       `,
-    });
+    }).catch(err => console.error('Error enviando email de verificación:', err));
 
     res.status(201).json({ message: 'Cuenta creada. Revisa tu email para verificar tu cuenta.' });
   } catch (error) {
@@ -165,7 +165,7 @@ router.post('/resend-verification', registerLimiter, async (req, res) => {
     const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:5173';
     const verifyUrl = `${frontendUrl}/verificar-email?token=${verificationToken}`;
 
-    await getTransporter().sendMail({
+    getTransporter().sendMail({
       from: process.env.EMAIL_USER,
       to: user.email,
       subject: 'Verifica tu email - La Taller',
@@ -181,7 +181,7 @@ router.post('/resend-verification', registerLimiter, async (req, res) => {
           <p style="color: #666; font-size: 14px;">Este enlace expira en 24 horas.</p>
         </div>
       `,
-    });
+    }).catch(err => console.error('Error reenviando email de verificación:', err));
 
     res.json({ message: 'Si el email existe, recibirás un nuevo enlace.' });
   } catch (error) {
