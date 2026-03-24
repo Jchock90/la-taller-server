@@ -1,9 +1,11 @@
 import express from 'express';
+import crypto from 'crypto';
 import jwt from 'jsonwebtoken';
 import rateLimit from 'express-rate-limit';
 import User from '../models/User.js';
 import Purchase from '../models/Purchase.js';
 import userAuth from '../middleware/userAuth.js';
+import { getTransporter, getFromAddress } from '../config/mailer.js';
 
 const router = express.Router();
 
@@ -50,15 +52,41 @@ router.post('/register', registerLimiter, async (req, res) => {
       return res.status(409).json({ error: 'Ya existe una cuenta con este email' });
     }
 
+    const verificationToken = crypto.randomBytes(32).toString('hex');
+    const verificationExpires = new Date(Date.now() + 24 * 60 * 60 * 1000); // 24h
+
     const user = await User.create({
       nombre: nombre.trim(),
       apellido: apellido.trim(),
       email: email.toLowerCase().trim(),
       password,
+      verificationToken,
+      verificationExpires,
     });
 
-    const token = generateToken(user);
-    res.status(201).json({ message: 'Cuenta creada exitosamente.', token, user });
+    // Send verification email (non-blocking)
+    const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:5173';
+    const verifyUrl = `${frontendUrl}/verificar-email?token=${verificationToken}`;
+    getTransporter().sendMail({
+      from: getFromAddress(),
+      to: user.email,
+      subject: 'Verificá tu email - La Taller',
+      html: `
+        <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;padding:20px;">
+          <h2 style="color:#333;">¡Hola ${user.nombre}!</h2>
+          <p style="color:#555;">Gracias por registrarte en La Taller. Para activar tu cuenta, hacé clic en el siguiente botón:</p>
+          <div style="text-align:center;margin:30px 0;">
+            <a href="${verifyUrl}" style="background-color:#000;color:#fff;padding:14px 28px;text-decoration:none;border-radius:6px;font-weight:bold;display:inline-block;">
+              Verificar mi email
+            </a>
+          </div>
+          <p style="font-size:12px;color:#999;">Si no creaste esta cuenta, podés ignorar este email. El link expira en 24 horas.</p>
+          <p style="font-size:11px;color:#bbb;margin-top:20px;">— La Taller</p>
+        </div>
+      `,
+    }).catch(err => console.error('Error enviando email de verificación:', err));
+
+    res.status(201).json({ message: 'Cuenta creada. Revisá tu email para verificar tu cuenta.' });
   } catch (error) {
     console.error('Error en registro:', error);
     res.status(500).json({ error: 'Error al crear la cuenta' });
@@ -83,11 +111,86 @@ router.post('/login', loginLimiter, async (req, res) => {
       return res.status(401).json({ error: 'Credenciales incorrectas' });
     }
 
+    if (!user.emailVerified) {
+      return res.status(403).json({ error: 'Email no verificado', needsVerification: true, email: user.email });
+    }
+
     const token = generateToken(user);
     res.json({ token, user });
   } catch (error) {
     console.error('Error en login:', error);
     res.status(500).json({ error: 'Error al iniciar sesión' });
+  }
+});
+
+// ── VERIFICAR EMAIL ───────────────────────────────────────
+router.get('/verify-email', async (req, res) => {
+  try {
+    const { token } = req.query;
+    if (!token) return res.status(400).json({ error: 'Token requerido' });
+
+    const user = await User.findOne({
+      verificationToken: token,
+      verificationExpires: { $gt: new Date() },
+    });
+
+    if (!user) {
+      return res.status(400).json({ error: 'Token inválido o expirado' });
+    }
+
+    user.emailVerified = true;
+    user.verificationToken = undefined;
+    user.verificationExpires = undefined;
+    await user.save();
+
+    const jwtToken = generateToken(user);
+    res.json({ message: 'Email verificado exitosamente', token: jwtToken, user });
+  } catch (error) {
+    console.error('Error verificando email:', error);
+    res.status(500).json({ error: 'Error al verificar email' });
+  }
+});
+
+// ── REENVIAR VERIFICACIÓN ─────────────────────────────────
+router.post('/resend-verification', async (req, res) => {
+  try {
+    const { email } = req.body;
+    if (!email) return res.status(400).json({ error: 'Email requerido' });
+
+    const user = await User.findOne({ email: email.toLowerCase() });
+    if (!user) return res.status(404).json({ error: 'No se encontró una cuenta con ese email' });
+    if (user.emailVerified) return res.status(400).json({ error: 'El email ya está verificado' });
+
+    const verificationToken = crypto.randomBytes(32).toString('hex');
+    user.verificationToken = verificationToken;
+    user.verificationExpires = new Date(Date.now() + 24 * 60 * 60 * 1000);
+    await user.save();
+
+    const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:5173';
+    const verifyUrl = `${frontendUrl}/verificar-email?token=${verificationToken}`;
+    await getTransporter().sendMail({
+      from: getFromAddress(),
+      to: user.email,
+      subject: 'Verificá tu email - La Taller',
+      html: `
+        <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;padding:20px;">
+          <h2 style="color:#333;">¡Hola ${user.nombre}!</h2>
+          <p style="color:#555;">Hacé clic en el siguiente botón para verificar tu email:</p>
+          <div style="text-align:center;margin:30px 0;">
+            <a href="${verifyUrl}" style="background-color:#000;color:#fff;padding:14px 28px;text-decoration:none;border-radius:6px;font-weight:bold;display:inline-block;">
+              Verificar mi email
+            </a>
+          </div>
+          <p style="font-size:12px;color:#999;">El link expira en 24 horas.</p>
+          <p style="font-size:11px;color:#bbb;margin-top:20px;">— La Taller</p>
+        </div>
+      `,
+    });
+
+    res.json({ message: 'Email de verificación reenviado' });
+  } catch (error) {
+    console.error('Error reenviando verificación:', error);
+    res.status(500).json({ error: 'Error al reenviar verificación' });
   }
 });
 
@@ -121,6 +224,12 @@ router.post('/google', async (req, res) => {
       if (!user.googleId) {
         user.googleId = googleId;
       }
+      // Google-authenticated users are verified
+      if (!user.emailVerified) {
+        user.emailVerified = true;
+        user.verificationToken = undefined;
+        user.verificationExpires = undefined;
+      }
       await user.save();
     } else {
       user = await User.create({
@@ -128,6 +237,7 @@ router.post('/google', async (req, res) => {
         apellido: family_name || '',
         email: email.toLowerCase(),
         googleId,
+        emailVerified: true,
       });
     }
 

@@ -5,8 +5,8 @@ import cors from "cors";
 import jwt from "jsonwebtoken";
 import { MercadoPagoConfig, Preference, Payment } from "mercadopago";
 import dotenv from "dotenv";
-import nodemailer from "nodemailer";
 import rateLimit from "express-rate-limit";
+import { getTransporter, getFromAddress } from "./config/mailer.js";
 import { addPurchaseRecord, getPurchaseRecord, updatePurchaseStatus, cleanOldRecords, loadPurchaseData } from "./dataStore.js";
 import connectDB from "./config/db.js";
 import productRoutes from "./routes/products.js";
@@ -204,13 +204,7 @@ app.post("/create_preference", createPreferenceLimiter, async (req, res) => {
   }
 });
 
-const transporter = nodemailer.createTransport({
-  service: 'gmail',
-  auth: {
-    user: process.env.EMAIL_USER,
-    pass: process.env.EMAIL_PASS,
-  },
-});
+
 
 app.post("/webhook", webhookLimiter, async (req, res) => {
   try {
@@ -301,8 +295,8 @@ app.post("/webhook", webhookLimiter, async (req, res) => {
           .join('');
         const total = (found.items || []).reduce((s, i) => s + i.unit_price * i.quantity, 0);
 
-        await transporter.sendMail({
-          from: process.env.EMAIL_USER,
+        await getTransporter().sendMail({
+          from: getFromAddress(),
           to: process.env.ADMIN_EMAIL,
           subject: `Nueva compra en La Taller`,
           html: `
@@ -326,8 +320,8 @@ app.post("/webhook", webhookLimiter, async (req, res) => {
           `,
         });
 
-        await transporter.sendMail({
-          from: process.env.EMAIL_USER,
+        await getTransporter().sendMail({
+          from: getFromAddress(),
           to: found.email,
           subject: "¡Compra exitosa en La Taller!",
           html: `
@@ -440,8 +434,8 @@ async function reconcilePendingPurchases() {
             .join('');
           const total = purchase.total || purchase.items.reduce((s, i) => s + i.unit_price * i.quantity, 0);
 
-          await transporter.sendMail({
-            from: process.env.EMAIL_USER,
+          await getTransporter().sendMail({
+            from: getFromAddress(),
             to: process.env.ADMIN_EMAIL,
             subject: `Nueva compra en La Taller (reconciliada)`,
             html: `
@@ -466,8 +460,8 @@ async function reconcilePendingPurchases() {
             `,
           });
 
-          await transporter.sendMail({
-            from: process.env.EMAIL_USER,
+          await getTransporter().sendMail({
+            from: getFromAddress(),
             to: purchase.email,
             subject: "¡Compra exitosa en La Taller!",
             html: `

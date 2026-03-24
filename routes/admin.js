@@ -2,7 +2,7 @@ import express from 'express';
 import jwt from 'jsonwebtoken';
 import bcrypt from 'bcryptjs';
 import multer from 'multer';
-import nodemailer from 'nodemailer';
+import { getTransporter, getFromAddress } from '../config/mailer.js';
 import { v2 as cloudinary } from 'cloudinary';
 import Product from '../models/Product.js';
 import Purchase from '../models/Purchase.js';
@@ -439,18 +439,14 @@ router.put('/sales/:id/tracking', authMiddleware, async (req, res) => {
 
     // Enviar email de seguimiento al comprador
     try {
-      const nodemailer = (await import('nodemailer')).default;
-      const transporter = nodemailer.createTransport({
-        service: 'gmail',
-        auth: { user: process.env.EMAIL_USER, pass: process.env.EMAIL_PASS },
-      });
+      const transporter = getTransporter();
 
       const itemsList = sale.items.map(i =>
         `<li style="padding:4px 0;color:#555;">${i.title} x${i.quantity}${i.talle ? ` - ${i.talle}` : ''}${i.color ? ` - ${i.color}` : ''}</li>`
       ).join('');
 
       await transporter.sendMail({
-        from: process.env.EMAIL_USER,
+        from: getFromAddress(),
         to: sale.email,
         subject: '¡Tu pedido fue despachado! - La Taller',
         html: `
@@ -515,13 +511,6 @@ router.delete('/sales/:id', authMiddleware, async (req, res) => {
 
 // ────────── EMAIL ENDPOINTS ──────────
 
-function getTransporter() {
-  return nodemailer.createTransport({
-    service: 'gmail',
-    auth: { user: process.env.EMAIL_USER, pass: process.env.EMAIL_PASS },
-  });
-}
-
 function buildEmailHtml(subject, body, footerText, richHtml) {
   const content = richHtml
     ? richHtml
@@ -571,7 +560,7 @@ router.post('/email/send', authMiddleware, async (req, res) => {
     let recipients = [];
 
     if (type === 'newsletter') {
-      const users = await User.find().select('email');
+      const users = await User.find({ emailVerified: true }).select('email');
       recipients = users.map(u => u.email);
       if (recipients.length === 0) {
         return res.status(400).json({ error: 'No hay usuarios registrados para enviar' });
@@ -599,7 +588,7 @@ router.post('/email/send', authMiddleware, async (req, res) => {
       const results = await Promise.allSettled(
         batch.map(email =>
           transporter.sendMail({
-            from: process.env.EMAIL_USER,
+            from: getFromAddress(),
             to: email,
             subject: subject.trim(),
             html: emailHtml,
@@ -672,7 +661,7 @@ router.delete('/email/sent/:id', authMiddleware, async (req, res) => {
 // GET /api/admin/email/recipients - Obtener lista de destinatarios posibles
 router.get('/email/recipients', authMiddleware, async (req, res) => {
   try {
-    const users = await User.find().select('nombre apellido email googleId').lean();
+    const users = await User.find().select('nombre apellido email googleId emailVerified').lean();
     // También agregar compradores sin cuenta (emails únicos de purchases que no son users)
     const userEmails = new Set(users.map(u => u.email.toLowerCase()));
     const guestPurchases = await Purchase.aggregate([
@@ -683,10 +672,12 @@ router.get('/email/recipients', authMiddleware, async (req, res) => {
       .filter(g => !userEmails.has(g._id))
       .map(g => ({ nombre: g.nombre, apellido: g.apellido, email: g.email, isGuest: true }));
 
+    const verifiedUsers = users.filter(u => u.emailVerified);
     res.json({
       users: users.map(u => ({ ...u, isGuest: false })),
       guests,
       total: users.length,
+      totalVerified: verifiedUsers.length,
     });
   } catch (error) {
     console.error('Error obteniendo destinatarios:', error);

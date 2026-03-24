@@ -16,6 +16,9 @@ const userSchema = new mongoose.Schema({
   pisoDepto: { type: String, trim: true, default: '' },
   password: { type: String },
   googleId: { type: String, sparse: true },
+  emailVerified: { type: Boolean, default: false },
+  verificationToken: { type: String },
+  verificationExpires: { type: Date },
   resetPasswordToken: { type: String },
   resetPasswordExpires: { type: Date },
 }, { timestamps: true });
@@ -35,6 +38,8 @@ userSchema.methods.comparePassword = async function (candidatePassword) {
 userSchema.methods.toJSON = function () {
   const obj = this.toObject();
   delete obj.password;
+  delete obj.verificationToken;
+  delete obj.verificationExpires;
   delete obj.resetPasswordToken;
   delete obj.resetPasswordExpires;
   return obj;
