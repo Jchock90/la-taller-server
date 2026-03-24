@@ -25,8 +25,12 @@ const app = express();
 
 app.set('trust proxy', 1);
 
+const allowedOrigins = process.env.FRONTEND_URL
+  ? [process.env.FRONTEND_URL, process.env.FRONTEND_URL.replace('://', '://www.')]
+  : ['http://localhost:5173'];
+
 const corsOptions = {
-  origin: process.env.FRONTEND_URL || 'http://localhost:5173',
+  origin: allowedOrigins,
   optionsSuccessStatus: 200
 };
 app.use(cors(corsOptions));
@@ -146,8 +150,9 @@ app.post("/create_preference", createPreferenceLimiter, async (req, res) => {
       metadata: buyerData,
     };
     
-    if (process.env.NGROK_URL) {
-      body.notification_url = `${process.env.NGROK_URL}/webhook`;
+    const webhookBase = process.env.BACKEND_URL || process.env.NGROK_URL;
+    if (webhookBase) {
+      body.notification_url = `${webhookBase}/webhook`;
     }
     
     const response = await preference.create({ body });
