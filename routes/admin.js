@@ -441,9 +441,7 @@ router.put('/sales/:id/tracking', authMiddleware, async (req, res) => {
     try {
       const nodemailer = (await import('nodemailer')).default;
       const transporter = nodemailer.createTransport({
-        host: process.env.EMAIL_HOST,
-        port: process.env.EMAIL_PORT,
-        secure: false,
+        service: 'gmail',
         auth: { user: process.env.EMAIL_USER, pass: process.env.EMAIL_PASS },
       });
 
@@ -519,9 +517,7 @@ router.delete('/sales/:id', authMiddleware, async (req, res) => {
 
 function getTransporter() {
   return nodemailer.createTransport({
-    host: process.env.EMAIL_HOST,
-    port: process.env.EMAIL_PORT,
-    secure: false,
+    service: 'gmail',
     auth: { user: process.env.EMAIL_USER, pass: process.env.EMAIL_PASS },
   });
 }
