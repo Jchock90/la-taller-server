@@ -132,9 +132,13 @@ app.post("/create_preference", createPreferenceLimiter, async (req, res) => {
     
     const preference = new Preference(client);
     const mpItems = items.map((item) => ({
+      id: String(item.id || item.title),
       title: item.title,
+      description: item.description || item.title,
+      category_id: item.category_id || 'fashion',
       unit_price: Number(item.unit_price),
       quantity: Number(item.quantity),
+      currency_id: 'ARS',
     }));
     
     const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:5173';
@@ -142,6 +146,19 @@ app.post("/create_preference", createPreferenceLimiter, async (req, res) => {
     const body = {
       items: mpItems,
       external_reference: orderId,
+      statement_descriptor: 'LA TALLER',
+      binary_mode: true,
+      payer: {
+        email: buyerData.email,
+        first_name: buyerData.nombre,
+        last_name: buyerData.apellido,
+        phone: {
+          number: buyerData.telefono || '',
+        },
+        address: {
+          zip_code: buyerData.codigoPostal || '',
+        },
+      },
       back_urls: {
         success: `${frontendUrl}/success`,
         failure: `${frontendUrl}/failure`,
