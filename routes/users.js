@@ -267,6 +267,30 @@ router.get('/profile', userAuth, async (req, res) => {
   }
 });
 
+// ── ACTUALIZAR PERFIL ─────────────────────────────────────
+router.put('/profile', userAuth, async (req, res) => {
+  try {
+    const allowedFields = ['nombre', 'apellido', 'telefono', 'direccion', 'pisoDepto', 'codigoPostal', 'provincia', 'ciudad'];
+    const updates = {};
+    for (const field of allowedFields) {
+      if (req.body[field] !== undefined) {
+        updates[field] = String(req.body[field]).trim().slice(0, 200);
+      }
+    }
+
+    const user = await User.findByIdAndUpdate(
+      req.user.userId,
+      { $set: updates },
+      { new: true, runValidators: true }
+    );
+    if (!user) return res.status(404).json({ error: 'Usuario no encontrado' });
+    res.json({ user });
+  } catch (error) {
+    console.error('Error actualizando perfil:', error);
+    res.status(500).json({ error: 'Error al actualizar perfil' });
+  }
+});
+
 // ── MIS COMPRAS ───────────────────────────────────────────
 router.get('/my-purchases', userAuth, async (req, res) => {
   try {
