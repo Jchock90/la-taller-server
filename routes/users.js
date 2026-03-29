@@ -151,6 +151,29 @@ router.get('/verify-email', async (req, res) => {
   }
 });
 
+const checkVerificationLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 15,
+  message: { error: 'Demasiadas consultas' },
+});
+
+router.get('/check-verification', checkVerificationLimiter, async (req, res) => {
+  try {
+    const { email } = req.query;
+    if (!email) return res.status(400).json({ verified: false });
+
+    const user = await User.findOne({ email: email.toLowerCase() });
+    if (!user || !user.emailVerified) {
+      return res.json({ verified: false });
+    }
+
+    const token = generateToken(user);
+    res.json({ verified: true, token, user: { _id: user._id, nombre: user.nombre, apellido: user.apellido, email: user.email } });
+  } catch (error) {
+    res.status(500).json({ verified: false });
+  }
+});
+
 // ── REENVIAR VERIFICACIÓN ─────────────────────────────────
 router.post('/resend-verification', async (req, res) => {
   try {
